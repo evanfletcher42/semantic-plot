@@ -4,6 +4,29 @@ import numpy as np
 from math_helpers import cubrt, safe_acos, safe_sqrt
 
 
+def init_spline_random(device):
+    """
+    Initializes a single spline, as a small-ish, random stroke, with limited curvature, in a sensible location.
+    :param device: Device for the output tensor
+    :return: Tuple (start_pt, ctrl_pt, end_pt), each tensors on the specified device with shape (2).
+    """
+
+    min_line_len = 0.05
+    max_line_len = 0.2
+
+    line_len = np.random.uniform(min_line_len, max_line_len)
+    line_angle = np.random.uniform(0.0, 2*np.pi)
+    line_vec = np.array([np.cos(line_angle), np.sin(line_angle)]) * line_len
+
+    start_pt = np.random.uniform(0.0 + line_len, 1.0 - line_len, size=2)
+    end_pt = start_pt + line_vec
+    ctrl_pt = (start_pt + end_pt) / 2 + np.random.normal(size=2) * line_len / 2
+
+    return torch.from_numpy(start_pt).type(torch.float32).to(device), \
+           torch.from_numpy(ctrl_pt).type(torch.float32).to(device), \
+           torch.from_numpy(end_pt).type(torch.float32).to(device)
+
+
 class QuadraticSplineRenderer(nn.Module):
     """
     A self-contained stroke renderer for quadratic splines.
@@ -20,9 +43,16 @@ class QuadraticSplineRenderer(nn.Module):
         super().__init__()
         self.img_shape = img_shape
 
-        self.a = nn.Parameter(torch.rand(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline start point
-        self.b = nn.Parameter(torch.rand(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline control point
-        self.c = nn.Parameter(torch.rand(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline end point
+        self.a = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=False)  # Quadratic spline start point
+        self.b = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=False)  # Quadratic spline control point
+        self.c = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=False)  # Quadratic spline end point
+
+        for i in range(n_lines):
+            self.a[i, :], self.b[i, :], self.c[i, :] = init_spline_random(self.a.device)
+
+        self.a.requires_grad = True
+        self.b.requires_grad = True
+        self.c.requires_grad = True
 
         self.lw = nn.Parameter(torch.ones(size=(n_lines, 1, 1, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
         self.lc = nn.Parameter(torch.ones(size=(n_lines, 1, 1, 1), requires_grad=True) * 0.5)  # Line color (intensity)
@@ -33,13 +63,13 @@ class QuadraticSplineRenderer(nn.Module):
         q = ax * (2 * ax * ax - 9 * ay) / 27.0 + az
         d = q * q + 4.0 * p3 / 27.0
 
-        # case d > 0:
+        # case d > 0: one root
         x0 = cubrt((1.0 * safe_sqrt(d) - q) * 0.5)
         x1 = cubrt((-1.0 * safe_sqrt(d) - q) * 0.5)
 
         root0 = x0 + x1 - ax / 3.0
 
-        # case d <= 0:
+        # case d <= 0: technically 3 roots, but the center one can't be the closest so we'll ignore it.
         p3_sdiv = torch.where(abs(p3) > 1e-9, p3, torch.ones_like(p3)*1e-9)
 
         v = safe_acos(-safe_sqrt(-27.0/p3_sdiv)*q*0.5)/3.0
@@ -111,7 +141,7 @@ class QuadraticSplineRenderer(nn.Module):
         dd2 = torch.sum(d2 * d2, dim=-1)
 
         d = safe_sqrt(torch.minimum(dd1, dd2))
-        d = d.reshape((d.shape[0], *p_orig_shape[:-1], 1))
+        d = d.reshape((d.shape[0], 1, *p_orig_shape[:-1]))
 
         return d
 
@@ -124,7 +154,7 @@ class QuadraticSplineRenderer(nn.Module):
                                 indexing='ij')
         p = torch.stack([yy, xx], dim=-1)
 
-        # dist shape: (n, rows, cols, 1)
+        # dist shape: (n, 1, rows, cols)
         dist = self.quadratic_bezier_distance(p=p, a=self.a, b=self.b, c=self.c)
 
         # note: these are white (1.0) lines on a dark (0.0) background
@@ -157,6 +187,6 @@ if __name__ == "__main__":
         print("Render time:", (t2 - t1) * 1e-6, "ms")
         print("max mem:", torch.cuda.max_memory_allocated(device) / 1024 / 1024)
 
-    img_n = img.detach().cpu().numpy()
+    img_n = img.detach().cpu().numpy()[0, ...]
     plt.imshow(img_n, cmap='gray')
     plt.show()
