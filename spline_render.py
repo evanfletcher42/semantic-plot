@@ -11,8 +11,8 @@ def init_spline_random(device):
     :return: Tuple (start_pt, ctrl_pt, end_pt), each tensors on the specified device with shape (2).
     """
 
-    min_line_len = 0.05
-    max_line_len = 0.2
+    min_line_len = 0.01
+    max_line_len = 0.05
 
     line_len = np.random.uniform(min_line_len, max_line_len)
     line_angle = np.random.uniform(0.0, 2*np.pi)
@@ -43,16 +43,13 @@ class QuadraticSplineRenderer(nn.Module):
         super().__init__()
         self.img_shape = img_shape
 
-        self.a = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=False)  # Quadratic spline start point
-        self.b = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=False)  # Quadratic spline control point
-        self.c = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=False)  # Quadratic spline end point
+        self.a = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline start point
+        self.b = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline control point
+        self.c = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline end point
 
-        for i in range(n_lines):
-            self.a[i, :], self.b[i, :], self.c[i, :] = init_spline_random(self.a.device)
-
-        self.a.requires_grad = True
-        self.b.requires_grad = True
-        self.c.requires_grad = True
+        with torch.no_grad():
+            for i in range(n_lines):
+                self.a[i, :], self.b[i, :], self.c[i, :] = init_spline_random(self.a.device)
 
         self.lw = nn.Parameter(torch.ones(size=(n_lines, 1, 1, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
         self.lc = nn.Parameter(torch.ones(size=(n_lines, 1, 1, 1), requires_grad=True) * 0.5)  # Line color (intensity)
@@ -132,7 +129,7 @@ class QuadraticSplineRenderer(nn.Module):
         roots = self.solve_cubic(cubic_a, cubic_b, cubic_c)
 
         # T = roots
-        T = torch.clip(roots, 0.0, 1.0)
+        T = torch.clamp(roots, 0.0, 1.0)
 
         d1 = (D + B * T[:, :, 0, None]) * T[:, :, 0, None] - C
         d2 = (D + B * T[:, :, 1, None]) * T[:, :, 1, None] - C
@@ -177,7 +174,7 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    lines = QuadraticSplineRenderer(n_lines=256, img_shape=(512, 512)).to(device)
+    lines = QuadraticSplineRenderer(n_lines=768, img_shape=(256, 256)).to(device)
 
     # with torch.no_grad():
     for i in range(1):
