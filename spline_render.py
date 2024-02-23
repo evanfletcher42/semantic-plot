@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 from math_helpers import cubrt, safe_acos, safe_sqrt
-
+# import matplotlib.pyplot as plt
+import cv2
 
 def init_spline_random(device):
     """
@@ -26,6 +27,51 @@ def init_spline_random(device):
            torch.from_numpy(ctrl_pt).type(torch.float32).to(device), \
            torch.from_numpy(end_pt).type(torch.float32).to(device)
 
+def init_spline_pmap(device, img_cdf, img_shape):
+    """
+    Initializes a single spline, contingent on the provided image-space cdf
+
+    :param device: Device for the output tensor
+    :param img_cdf: 2d cumulative probability distribution
+    :return: Tuple (start_pt, ctrl_pt, end_pt), each tensors on the specified device with shape (2).
+    """
+    x = np.random.rand()
+    idx = np.searchsorted(img_cdf, x)
+    pt = np.unravel_index(idx, img_shape)
+    ctr_pt = np.array([pt[0]/img_shape[0], pt[1]/img_shape[1]])
+
+    min_line_len = 0.01
+    max_line_len = 0.05
+
+    line_len = np.random.uniform(min_line_len, max_line_len)
+    line_angle = np.random.uniform(0.0, 2 * np.pi)
+    line_vec = np.array([np.cos(line_angle), np.sin(line_angle)]) * line_len
+
+    start_pt = ctr_pt - line_vec / 2
+    end_pt = ctr_pt + line_vec / 2
+    ctrl_pt = (start_pt + end_pt) / 2 + np.random.normal(size=2) * line_len / 2
+
+    return torch.from_numpy(start_pt).type(torch.float32).to(device), \
+           torch.from_numpy(ctrl_pt).type(torch.float32).to(device), \
+           torch.from_numpy(end_pt).type(torch.float32).to(device)
+
+def compute_pdf_grads(img):
+    """
+    Converts an image into a map of spline-goes-here probabilities based on gradient magnitude.
+    :param img: Image to compute a map from, shape (h, w)
+    :return: spline-goes-here probabilities, shape (h, w)
+    """
+    img_blur = cv2.GaussianBlur(img, ksize=None, sigmaX=7)
+    img_blur = img_blur / np.max(img_blur)
+
+    img_grad_mag = np.hypot(*np.gradient(img)) * (1.0 - img_blur)
+    img_grad_mag /= np.sum(img_grad_mag)
+
+    # plt.imshow(img_grad_mag)
+    # plt.show()
+
+    return img_grad_mag
+
 
 class QuadraticSplineRenderer(nn.Module):
     """
@@ -39,7 +85,7 @@ class QuadraticSplineRenderer(nn.Module):
     #  - This will result in a dense gradient computation for every line and pixel in the image.  Many pixels will have
     #    zero gradient wrt. parameters.  If there were a way to take advantage of this sparsity, that would be _amazing_
 
-    def __init__(self, n_lines=64, img_shape=(512, 512)):
+    def __init__(self, n_lines=64, img_shape=(512, 512), init_img=None):
         super().__init__()
         self.img_shape = img_shape
 
@@ -48,8 +94,17 @@ class QuadraticSplineRenderer(nn.Module):
         self.c = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline end point
 
         with torch.no_grad():
-            for i in range(n_lines):
-                self.a[i, :], self.b[i, :], self.c[i, :] = init_spline_random(self.a.device)
+            if init_img is None:
+                # random init
+                for i in range(n_lines):
+                    self.a[i, :], self.b[i, :], self.c[i, :] = init_spline_random(self.a.device)
+            else:
+                # image-contingent init
+                img_pdf = compute_pdf_grads(init_img)
+                img_cdf = np.cumsum(img_pdf)
+                img_cdf = img_cdf / img_cdf[-1]
+                for i in range(n_lines):
+                    self.a[i, :], self.b[i, :], self.c[i, :] = init_spline_pmap(self.a.device, img_cdf, img_pdf.shape)
 
         self.lw = nn.Parameter(torch.ones(size=(n_lines, 1, 1, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
         self.lc = nn.Parameter(torch.ones(size=(n_lines, 1, 1, 1), requires_grad=True) * 0.5)  # Line color (intensity)

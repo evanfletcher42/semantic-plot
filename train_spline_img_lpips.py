@@ -11,7 +11,7 @@ import numpy as np
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-img_path = "data/ordon_goat.png"
+img_path = "data/alyx.png"
 draw_sz = (256, 256)
 
 target_img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
@@ -22,7 +22,7 @@ plt.show()
 
 target = torch.tensor(target_img / 255.0, dtype=torch.float32).to(device)
 
-lines = QuadraticSplineRenderer(n_lines=768, img_shape=draw_sz).to(device)
+lines = QuadraticSplineRenderer(n_lines=768, img_shape=draw_sz, init_img=target_img).to(device)
 
 optim = torch.optim.Adam(
     [
@@ -30,7 +30,7 @@ optim = torch.optim.Adam(
         {"params": lines.b, "lr": 0.005},
         {"params": lines.c, "lr": 0.005},
         # {"params": lines.lw, "lr": 0.001},
-        {"params": lines.lc, "lr": 0.001}
+        {"params": lines.lc, "lr": 0.004}
     ]
 )
 
