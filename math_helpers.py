@@ -8,7 +8,9 @@ def cubrt(x):
     """
     Returns the cubic root of a number, without being silly about negative numbers.
     """
-    return torch.sign(x) * torch.pow(torch.abs(x), 1.0 / 3.0)
+    absx = torch.abs(x)
+    absxclip = torch.clamp(absx, min=1e-9, max=None)
+    return torch.sign(x) * torch.pow(absxclip, 1.0 / 3.0)
 
 
 def safe_sqrt(x):
@@ -21,6 +23,7 @@ def safe_sqrt(x):
 
 def safe_acos(x):
     """
-    Returns acos(x) with x clamped to (-1, 1))
+    Returns acos(x) with x clamped close to (-1, 1)
+    Note: Close to, but not at - gradients are undefined at ±1
     """
-    return torch.arccos(torch.clip(x, -1.0, 1.0))
+    return torch.arccos(torch.clip(x, -0.9999, 0.9999))
