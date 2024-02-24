@@ -90,8 +90,8 @@ class QuadraticSplineParams(nn.Module):
         self.a = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline start point
         self.b = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline control point
         self.c = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline end point
-        self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1, 1, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
-        self.lc = nn.Parameter(torch.ones(size=(1, n_lines, 1, 1, 1), requires_grad=True) * 0.5)  # Line color (intensity)
+        self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
+        self.lc = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * 0.5)  # Line color (intensity)
 
     def init_lines(self, init_img=None):
         """
@@ -232,7 +232,7 @@ class QuadraticSplineRenderer(nn.Module):
         dist = self.quadratic_bezier_distance(p=self.p, a=a, b=b, c=c)
 
         # note: these are white (1.0) lines on a dark (0.0) background
-        intensity = torch.sigmoid((lw - dist) / lw * 6.0) * lc
+        intensity = torch.sigmoid((lw[..., None, None] - dist) / lw[..., None, None] * 6.0) * lc[..., None, None]
 
         # Additive blending + clamp over all lines --> shape (rows, cols, 1)
         # TODO: Actual blend should be: blended = intensity + (1 - intensity) * prev_img
@@ -261,7 +261,11 @@ if __name__ == "__main__":
         t1 = time.perf_counter_ns()
         img = lines(*line_params())
         t2 = time.perf_counter_ns()
+        img_mean = torch.mean(img)
+        img_mean.backward()
+        t3 = time.perf_counter_ns()
         print("Render time:", (t2 - t1) * 1e-6, "ms")
+        print("Backprop time:", (t3 - t2) * 1e-6, "ms")
         print("max mem:", torch.cuda.max_memory_allocated(device) / 1024 / 1024)
         print("img shape:", img.shape)
 
