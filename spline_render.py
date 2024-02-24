@@ -61,10 +61,17 @@ def compute_pdf_grads(img):
     :param img: Image to compute a map from, shape (h, w)
     :return: spline-goes-here probabilities, shape (h, w)
     """
-    img_blur = cv2.GaussianBlur(img, ksize=None, sigmaX=7)
-    img_blur = img_blur / np.max(img_blur)
+    img_grad_mag = np.hypot(*np.gradient(img))
 
-    img_grad_mag = np.hypot(*np.gradient(img)) * (1.0 - img_blur)
+    # threshold gradients at gradient image mean: don't want high contrast objects getting all the lines
+    img_grad_mag = np.minimum(img_grad_mag, np.mean(img_grad_mag) + np.std(img_grad_mag) * 0.5)
+
+    # lines darken images; make them more likely to be in places where the image is dark
+    img_blur = cv2.GaussianBlur(img, ksize=None, sigmaX=7)
+    img_blur = img_blur / np.max(img_blur) * 0.5
+    img_grad_mag *= (1.0 - img_blur)
+
+    # Normalize pdf
     img_grad_mag /= np.sum(img_grad_mag)
 
     # plt.imshow(img_grad_mag)
@@ -73,10 +80,45 @@ def compute_pdf_grads(img):
     return img_grad_mag
 
 
+class QuadraticSplineParams(nn.Module):
+    """
+    Contains and returns one set of parameters for a spline renderer.
+    """
+    def __init__(self, n_lines=64, img_shape=(512, 512), init_img=None):
+        super().__init__()
+        self.n_lines = n_lines
+        self.a = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline start point
+        self.b = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline control point
+        self.c = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline end point
+        self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1, 1, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
+        self.lc = nn.Parameter(torch.ones(size=(1, n_lines, 1, 1, 1), requires_grad=True) * 0.5)  # Line color (intensity)
+
+    def init_lines(self, init_img=None):
+        """
+        Initializes lines based on a cheesy image-gradient-and-intensity argument, or randomly if no image is provided.
+        :param init_img: Numpy array containing the image being targeted, or None.  If None, init is random.
+        """
+        with torch.no_grad():
+            if init_img is None:
+                # random init
+                for i in range(self.n_lines):
+                    self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
+            else:
+                # image-contingent init
+                img_pdf = compute_pdf_grads(init_img)
+                img_cdf = np.cumsum(img_pdf)
+                img_cdf = img_cdf / img_cdf[-1]
+                for i in range(self.n_lines):
+                    self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf, img_pdf.shape)
+
+    def forward(self):
+        # Return parameters directly
+        return self.a, self.b, self.c, self.lw, self.lc
+
+
 class QuadraticSplineRenderer(nn.Module):
     """
     A self-contained stroke renderer for quadratic splines.
-    Contains parameters for a configurable number of lines, handles blending them into a monochrome image.
     """
 
     # TODO: Efficiency improvements.
@@ -85,29 +127,16 @@ class QuadraticSplineRenderer(nn.Module):
     #  - This will result in a dense gradient computation for every line and pixel in the image.  Many pixels will have
     #    zero gradient wrt. parameters.  If there were a way to take advantage of this sparsity, that would be _amazing_
 
-    def __init__(self, n_lines=64, img_shape=(512, 512), init_img=None):
+    def __init__(self, img_shape=(256, 256)):
         super().__init__()
         self.img_shape = img_shape
 
-        self.a = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline start point
-        self.b = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline control point
-        self.c = nn.Parameter(torch.zeros(size=(n_lines, 2)), requires_grad=True)  # Quadratic spline end point
-
-        with torch.no_grad():
-            if init_img is None:
-                # random init
-                for i in range(n_lines):
-                    self.a[i, :], self.b[i, :], self.c[i, :] = init_spline_random(self.a.device)
-            else:
-                # image-contingent init
-                img_pdf = compute_pdf_grads(init_img)
-                img_cdf = np.cumsum(img_pdf)
-                img_cdf = img_cdf / img_cdf[-1]
-                for i in range(n_lines):
-                    self.a[i, :], self.b[i, :], self.c[i, :] = init_spline_pmap(self.a.device, img_cdf, img_pdf.shape)
-
-        self.lw = nn.Parameter(torch.ones(size=(n_lines, 1, 1, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
-        self.lc = nn.Parameter(torch.ones(size=(n_lines, 1, 1, 1), requires_grad=True) * 0.5)  # Line color (intensity)
+        # Texture coordinates
+        # Register these as a buffer so .to(device) works
+        yy, xx = torch.meshgrid(torch.linspace(0.0, 1.0, self.img_shape[1]),
+                                torch.linspace(0.0, 1.0, self.img_shape[0]),
+                                indexing='ij')
+        self.register_buffer("p", torch.stack([yy, xx], dim=-1), persistent=False)
 
     def solve_cubic(self, ax, ay, az):
         p = ay - ax * ax / 3.0
@@ -158,17 +187,17 @@ class QuadraticSplineRenderer(nn.Module):
 
         # TODO: It looks like the original author(s) may have considerably simplified this.  Try that sometime.
 
-        # TODO: This is a simple guard against point b being at (0, 0), which would make this blow up.
+        # This is a simple guard against point b being at (0, 0), which would make this blow up.
         b = b + 1e-5
 
         # reshapes for broadcasting
 
         p_orig_shape = p.shape
-        p = p.reshape((1, -1, 2))  # To shape: (..., 2)
+        p = p.reshape((1, 1, -1, 2))  # To shape: (..., 2)
 
-        a = a[:, None, :]
-        b = b[:, None, :]
-        c = c[:, None, :]
+        a = a[:, :, None, :]
+        b = b[:, :, None, :]
+        c = c[:, :, None, :]
 
         A = b - a
         B = c - b - A
@@ -186,36 +215,29 @@ class QuadraticSplineRenderer(nn.Module):
         # T = roots
         T = torch.clamp(roots, 0.0, 1.0)
 
-        d1 = (D + B * T[:, :, 0, None]) * T[:, :, 0, None] - C
-        d2 = (D + B * T[:, :, 1, None]) * T[:, :, 1, None] - C
+        d1 = (D + B * T[:, :, :, 0, None]) * T[:, :, :, 0, None] - C
+        d2 = (D + B * T[:, :, :, 1, None]) * T[:, :, :, 1, None] - C
 
         dd1 = torch.sum(d1 * d1, dim=-1)
         dd2 = torch.sum(d2 * d2, dim=-1)
 
         d = safe_sqrt(torch.minimum(dd1, dd2))
-        d = d.reshape((d.shape[0], 1, *p_orig_shape[:-1]))
+        d = d.reshape((d.shape[0], d.shape[1], 1, *p_orig_shape[:-1]))
 
         return d
 
-    def forward(self):  # Look ma, no 'x'
-        # Texture coordinates (TBD: requires_grad ?)
-        d = self.a.device
-
-        yy, xx = torch.meshgrid(torch.linspace(0.0, 1.0, self.img_shape[1], device=d),
-                                torch.linspace(0.0, 1.0, self.img_shape[0], device=d),
-                                indexing='ij')
-        p = torch.stack([yy, xx], dim=-1)
+    def forward(self, a, b, c, lw, lc):
 
         # dist shape: (n, 1, rows, cols)
-        dist = self.quadratic_bezier_distance(p=p, a=self.a, b=self.b, c=self.c)
+        dist = self.quadratic_bezier_distance(p=self.p, a=a, b=b, c=c)
 
         # note: these are white (1.0) lines on a dark (0.0) background
-        intensity = torch.sigmoid((self.lw - dist) / self.lw * 6.0) * self.lc
+        intensity = torch.sigmoid((lw - dist) / lw * 6.0) * lc
 
         # Additive blending + clamp over all lines --> shape (rows, cols, 1)
         # TODO: Actual blend should be: blended = intensity + (1 - intensity) * prev_img
         #       That can be done in a loop.  I probably need to be reminded why doing it this way is a bad idea.
-        intensity = torch.clamp(torch.sum(intensity, dim=0), 0.0, 1.0)
+        intensity = torch.clamp(torch.sum(intensity, dim=1), 0.0, 1.0)
 
         # Invert (we want dark lines on white background)
         intensity = 1 - intensity
@@ -229,16 +251,20 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    lines = QuadraticSplineRenderer(n_lines=768, img_shape=(256, 256)).to(device)
+    line_params = QuadraticSplineParams(n_lines=768, img_shape=(256, 256)).to(device)
+    line_params.init_lines()
+
+    lines = QuadraticSplineRenderer(img_shape=(256, 256)).to(device)
 
     # with torch.no_grad():
     for i in range(1):
         t1 = time.perf_counter_ns()
-        img = lines()
+        img = lines(*line_params())
         t2 = time.perf_counter_ns()
         print("Render time:", (t2 - t1) * 1e-6, "ms")
         print("max mem:", torch.cuda.max_memory_allocated(device) / 1024 / 1024)
+        print("img shape:", img.shape)
 
-    img_n = img.detach().cpu().numpy()[0, ...]
+    img_n = img.detach().cpu().numpy()[0, 0, ...]
     plt.imshow(img_n, cmap='gray')
     plt.show()
