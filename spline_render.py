@@ -111,6 +111,26 @@ class QuadraticSplineParams(nn.Module):
                 for i in range(self.n_lines):
                     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf, img_pdf.shape)
 
+    def reinit_invisible(self, min_intensity=0.025, init_img = None):
+        with torch.no_grad():
+
+            if init_img is not None:
+                img_pdf = compute_pdf_grads(init_img)
+                img_cdf = np.cumsum(img_pdf)
+                img_cdf = img_cdf / img_cdf[-1]
+
+            for i in range(self.n_lines):
+                if self.lc[0, i, 0].item() < min_intensity:
+                    print("reinit", i)
+
+                    if init_img is not None:
+                        self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf,
+                                                                                             img_pdf.shape)
+                    else:
+                        self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
+
+                    self.lc[0, i, 0] = 0.5
+
     def forward(self):
         # Return parameters directly
         return self.a, self.b, self.c, self.lw, self.lc
@@ -237,7 +257,7 @@ class QuadraticSplineRenderer(nn.Module):
         # Additive blending + clamp over all lines --> shape (rows, cols, 1)
         # TODO: Actual blend should be: blended = intensity + (1 - intensity) * prev_img
         #       That can be done in a loop.  I probably need to be reminded why doing it this way is a bad idea.
-        intensity = torch.clamp(torch.sum(intensity, dim=1), 0.0, 1.0)
+        intensity = torch.sum(intensity, dim=1)
 
         # Invert (we want dark lines on white background)
         intensity = 1 - intensity
