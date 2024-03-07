@@ -41,7 +41,8 @@ def main():
 
     tstr = time.strftime("%Y-%m-%d_%H-%M-%S")
     out_dir = os.path.join("outputs", Path(os.path.basename(img_path)).stem + "_" + tstr)
-    os.makedirs(out_dir, exist_ok=False)
+    svg_dir = os.path.join(out_dir, "svg")
+    os.makedirs(svg_dir, exist_ok=False)
 
     perceptual_loss = LPIPS().to(device)
 
@@ -81,6 +82,7 @@ def main():
             best_loss = loss
             img_np = np.clip(img_render.detach().cpu().numpy() * 255, 0, 255)
             cv2.imwrite(os.path.join(out_dir, "%06d_%0.04f.png" % (i, best_loss)), img_np[0, 0, ...])
+            line_params.save_svg(os.path.join(svg_dir, "%06d_%0.04f.svg" % (i, best_loss)))
         else:
             # reinit invisible if we are taking negative steps
             line_params.reinit_invisible(init_img=target_img)

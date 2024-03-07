@@ -131,6 +131,24 @@ class QuadraticSplineParams(nn.Module):
 
                     self.lc[0, i, 0] = 0.5
 
+    def save_svg(self, svg_path, img_sz=(512, 512)):
+        with torch.no_grad():
+            svg_data = f'<svg width="{img_sz[1]}" height="{img_sz[0]}" xmlns="http://www.w3.org/2000/svg">\n'
+
+            for i in range(self.n_lines):
+                a = self.a[0, i, :].cpu().numpy() * img_sz[0]
+                b = self.b[0, i, :].cpu().numpy() * img_sz[0]
+                c = self.c[0, i, :].cpu().numpy() * img_sz[0]
+                gray = int(np.clip(255 * (1 - self.lc[0, i, 0].item()) + 0.5, 0, 255))
+                lw = img_sz[0] * self.lw[0, i, 0].item()
+
+                svg_data += f'  <path d="M{a[1]},{a[0]} Q{b[1]},{b[0]} {c[1]},{c[0]}" stroke="rgb({gray}, {gray}, {gray})" stroke-width="{lw}" fill="transparent"/>\n'
+
+            svg_data += '</svg>'
+
+            with open(svg_path, 'w') as svg_file:
+                svg_file.write(svg_data)
+
     def forward(self):
         # Return parameters directly
         return self.a, self.b, self.c, self.lw, self.lc
