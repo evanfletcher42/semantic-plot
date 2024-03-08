@@ -93,6 +93,51 @@ class QuadraticSplineParams(nn.Module):
         self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
         self.lc = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * 0.5)  # Line color (intensity)
 
+    def reinit_spline_split(self, replace_idx):
+        """
+        Re-initializes a spline by splitting the longest spline in half.
+
+        :param replace_idx: Index of the spline to replace.
+        """
+        with torch.no_grad():
+            # find longest, where length is very roughly approximated by distance from endpoints to control point.
+            longest_idx = 0
+            longest_len = 0.0
+            for i in range(self.n_lines):
+                # Candidate for splitting
+                if i == replace_idx:
+                    continue
+
+                if self.lc[0, i, 0].item() < 0.025:
+                    continue
+
+                l = torch.linalg.norm(self.a[0, i, :] - self.b[0, i, :]) + torch.linalg.norm(self.b[0, i, :] - self.c[0, i, :]).item()
+                if l > longest_len:
+                    longest_idx = i
+                    longest_len = l
+
+        # split at midpoint
+        t0 = 0.5
+
+        # new control points
+        b0 = (1 - t0) * self.a[0, longest_idx, :] + t0 * self.b[0, longest_idx, :]
+        b1 = (1 - t0) * self.b[0, longest_idx, :] + t0 * self.c[0, longest_idx, :]
+
+        # split point
+        s0 = (1 - t0) * b0 + t0 * b1
+
+        # modify splines
+        self.a[0, replace_idx, :] = s0
+        self.b[0, replace_idx, :] = b1
+        self.c[0, replace_idx, :] = self.c[0, longest_idx, :]
+        self.lw[0, replace_idx, :] = self.lw[0, longest_idx, :]
+        self.lc[0, replace_idx, :] = self.lc[0, longest_idx, :]
+
+        self.b[0, longest_idx, :] = b0
+        self.c[0, longest_idx, :] = s0
+
+        print(f"Split {longest_idx} (len {longest_len})")
+
     def init_lines(self, init_img=None):
         """
         Initializes lines based on a cheesy image-gradient-and-intensity argument, or randomly if no image is provided.
@@ -122,14 +167,15 @@ class QuadraticSplineParams(nn.Module):
             for i in range(self.n_lines):
                 if self.lc[0, i, 0].item() < min_intensity:
                     print("reinit", i)
+                    self.reinit_spline_split(i)
 
-                    if init_img is not None:
-                        self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf,
-                                                                                             img_pdf.shape)
-                    else:
-                        self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
-
-                    self.lc[0, i, 0] = 0.5
+                    # if init_img is not None:
+                    #     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf,
+                    #                                                                          img_pdf.shape)
+                    # else:
+                    #     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
+                    #
+                    # self.lc[0, i, 0] = 0.5
 
     def save_svg(self, svg_path, img_sz=(512, 512)):
         with torch.no_grad():
