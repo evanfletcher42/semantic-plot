@@ -5,6 +5,7 @@ from math_helpers import cubrt, safe_acos, safe_sqrt
 # import matplotlib.pyplot as plt
 import cv2
 
+
 def init_spline_random(device):
     """
     Initializes a single spline, as a small-ish, random stroke, with limited curvature, in a sensible location.
@@ -156,7 +157,7 @@ class QuadraticSplineParams(nn.Module):
                 for i in range(self.n_lines):
                     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf, img_pdf.shape)
 
-    def reinit_invisible(self, min_intensity=0.025, init_img = None):
+    def reinit_invisible(self, min_intensity=0.025, init_img=None, curr_img=None):
         with torch.no_grad():
 
             if init_img is not None:
@@ -164,18 +165,29 @@ class QuadraticSplineParams(nn.Module):
                 img_cdf = np.cumsum(img_pdf)
                 img_cdf = img_cdf / img_cdf[-1]
 
+            if curr_img is not None:
+                # prefer to initialize lines in areas where we do not already have lines of any intensity
+                curr_pdf = (curr_img < 255)
+                img_pdf = img_pdf * (1 - curr_pdf)
+                img_pdf = img_pdf / np.sum(img_pdf)
+                img_cdf = np.cumsum(img_pdf)
+                img_cdf = img_cdf / img_cdf[-1]
+
             for i in range(self.n_lines):
                 if self.lc[0, i, 0].item() < min_intensity:
                     print("reinit", i)
-                    self.reinit_spline_split(i)
 
-                    # if init_img is not None:
-                    #     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf,
-                    #                                                                          img_pdf.shape)
-                    # else:
-                    #     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
-                    #
-                    # self.lc[0, i, 0] = 0.5
+                    # Split long splines most of the time; reroll location sometimes.
+                    if np.random.rand(1) < 0.80:
+                        self.reinit_spline_split(i)
+                    else:
+                        if init_img is not None:
+                            self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf,
+                                                                                                 img_pdf.shape)
+                        else:
+                            self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
+
+                        self.lc[0, i, 0] = 0.5
 
     def save_svg(self, svg_path, img_sz=(512, 512)):
         with torch.no_grad():
