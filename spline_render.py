@@ -81,6 +81,53 @@ def compute_pdf_grads(img):
     return img_grad_mag
 
 
+def compute_pdf_semantic(imgi, loss_func):
+    """
+    Computes a map of spline-goes-here probabilities based on feature map gradients.
+
+    This computes the *image* gradient comparing the current image against the target.
+    Pixels with positive gradients are those where darkening the image (by adding splines) will improve the loss.
+
+    We also require that these are co-located with actual edges in the image, and on sections that need ink.
+
+    :param img: The current image, torch.Tensor, shape (h, w)
+    :param loss_func: The semantic loss function instance to use here.
+    :return: spline-goes-here probabilities, shape (h, w)
+    """
+    img = imgi.detach()
+
+    with torch.enable_grad():
+        img.requires_grad = True
+        loss = loss_func(img)
+        loss.backward()
+        xg = img.grad.cpu().numpy().squeeze()
+
+    # blur this a bit. This is going to have checkerboard-y artifacts that we don't want to draw.
+    xg = cv2.GaussianBlur(xg, ksize=None, sigmaX=1.414)
+    xg = np.clip(xg, a_min=0.0, a_max=None) # we care only about areas where the image wants to be darker
+
+    # init lines where there are actual edges in the image
+    img_grad_mag = np.hypot(*np.gradient(loss_func.target_img.cpu().numpy().squeeze()))
+    img_grad_mag = np.minimum(img_grad_mag, np.mean(img_grad_mag) + np.std(img_grad_mag) * 0.5)
+
+    # lines darken images; make them more likely to be in places where the image is dark
+    target_np = loss_func.target_img.cpu().numpy().squeeze()
+    img_blur = cv2.GaussianBlur(target_np, ksize=None, sigmaX=7)
+    img_blur /= np.max(img_blur)
+
+    xg = xg * img_grad_mag * (1.0 - img_blur)
+
+    # Normalize pdf
+    xg /= np.sum(xg)
+
+    # plt.imshow(xg)
+    # plt.show()
+    # exit(0)
+
+    return xg
+
+
+
 class QuadraticSplineParams(nn.Module):
     """
     Contains and returns one set of parameters for a spline renderer.
@@ -139,39 +186,34 @@ class QuadraticSplineParams(nn.Module):
 
         print(f"Split {longest_idx} (len {longest_len})")
 
-    def init_lines(self, init_img=None):
+    def init_lines(self, loss_func=None):
         """
-        Initializes lines based on a cheesy image-gradient-and-intensity argument, or randomly if no image is provided.
-        :param init_img: Numpy array containing the image being targeted, or None.  If None, init is random.
+        Initializes lines based on a semantic target, or randomly if there isn't one.
+        :param loss_func: Cached loss function containing the semantic target.
         """
         with torch.no_grad():
-            if init_img is None:
+            if loss_func is None:
                 # random init
                 for i in range(self.n_lines):
                     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
             else:
-                # image-contingent init
-                img_pdf = compute_pdf_grads(init_img)
+                ones = torch.ones(loss_func.target_img.shape, dtype=torch.float32, device=self.a.device)
+                img_pdf = compute_pdf_semantic(ones, loss_func)
                 img_cdf = np.cumsum(img_pdf)
                 img_cdf = img_cdf / img_cdf[-1]
                 for i in range(self.n_lines):
                     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf, img_pdf.shape)
 
-    def reinit_invisible(self, min_intensity=0.025, init_img=None, curr_img=None):
+    def reinit_invisible(self, min_intensity=0.025, curr_img=None, loss_func=None):
         with torch.no_grad():
 
-            if init_img is not None:
-                img_pdf = compute_pdf_grads(init_img)
-                img_cdf = np.cumsum(img_pdf)
-                img_cdf = img_cdf / img_cdf[-1]
+            if curr_img is None:
+                curr_img = torch.ones(loss_func.target_img.shape, dtype=torch.float32, device=self.a.device)
 
-            if curr_img is not None:
-                # prefer to initialize lines in areas where we do not already have lines of any intensity
-                curr_pdf = (curr_img < 255)
-                img_pdf = img_pdf * (1 - curr_pdf)
-                img_pdf = img_pdf / np.sum(img_pdf)
-                img_cdf = np.cumsum(img_pdf)
-                img_cdf = img_cdf / img_cdf[-1]
+            img_pdf = compute_pdf_semantic(curr_img, loss_func)
+
+            img_cdf = np.cumsum(img_pdf)
+            img_cdf = img_cdf / img_cdf[-1]
 
             for i in range(self.n_lines):
                 if self.lc[0, i, 0].item() < min_intensity:
@@ -181,12 +223,9 @@ class QuadraticSplineParams(nn.Module):
                     if np.random.rand(1) < 0.80:
                         self.reinit_spline_split(i)
                     else:
-                        if init_img is not None:
-                            self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf,
+                        # choose somewhere the probability map wants to
+                        self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf,
                                                                                                  img_pdf.shape)
-                        else:
-                            self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
-
                         self.lc[0, i, 0] = 0.5
 
     def save_svg(self, svg_path, img_sz=(512, 512)):

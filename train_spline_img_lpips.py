@@ -23,9 +23,11 @@ def main():
     plt.show()
 
     target = torch.tensor(target_img / 255.0, dtype=torch.float32).to(device)
+    perceptual_loss = CachedLPIPS().to(device)
+    perceptual_loss.set_target(target[None, ...])
 
     line_params = QuadraticSplineParams(n_lines=n_lines, img_shape=draw_sz).to(device)
-    line_params.init_lines(target_img)
+    line_params.init_lines(loss_func=perceptual_loss)
 
     lines = QuadraticSplineRenderer(img_shape=draw_sz).to(device)
 
@@ -43,9 +45,6 @@ def main():
     out_dir = os.path.join("outputs", Path(os.path.basename(img_path)).stem + "_" + tstr)
     svg_dir = os.path.join(out_dir, "svg")
     os.makedirs(svg_dir, exist_ok=False)
-
-    perceptual_loss = CachedLPIPS().to(device)
-    perceptual_loss.set_target(target[None, ...])
 
     best_loss = 1e9
     prev_loss = 1e9
@@ -82,7 +81,7 @@ def main():
         else:
             # reinit invisible if we are taking negative steps
             if loss > prev_loss:
-                line_params.reinit_invisible(init_img=target_img, curr_img=img_np[0, 0, ...])
+                line_params.reinit_invisible(curr_img=img_render, loss_func=perceptual_loss)
 
         prev_loss = loss
 

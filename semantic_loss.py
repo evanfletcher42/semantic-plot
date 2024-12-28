@@ -14,10 +14,12 @@ class CachedLPIPS(nn.Module):
         self.feature_extractor = CachedLPIPS._FeatureExtractor()
         self.normalize = normalize
         self.target = None
+        self.target_img = None
 
     def set_target(self, target_img):
         # precompute target feature map
-        self.target = self.feature_extractor(target_img)
+        self.target_img = target_img
+        self.target = self.feature_extractor(self.target_img)
         self.target = [self._l2_normalize_features(f) for f in self.target]
 
     def _l2_normalize_features(self, x, eps=1e-10):
