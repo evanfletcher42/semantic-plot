@@ -9,9 +9,10 @@ class CachedLPIPS(nn.Module):
     For saving compute in cases where the target image is always the same.
     """
 
-    def __init__(self):
+    def __init__(self, normalize=True):
         super(CachedLPIPS, self).__init__()
         self.feature_extractor = CachedLPIPS._FeatureExtractor()
+        self.normalize = normalize
         self.target = None
 
     def set_target(self, target_img):
@@ -50,6 +51,10 @@ class CachedLPIPS(nn.Module):
 
             # Split at the maxpools, before ReLU
             self.breakpoints = [0, 3, 8, 15, 22, 29]
+
+            # Split after ReLU
+            # self.breakpoints = [0, 4, 9, 16, 23, 30]
+
             for i, b in enumerate(self.breakpoints[:-1]):
                 ops = nn.Sequential()
                 for idx in range(b, self.breakpoints[i+1]):
@@ -72,3 +77,5 @@ class CachedLPIPS(nn.Module):
                 m = getattr(self, "group{}".format(idx))
                 x = m(x)
                 feats.append(x)
+
+            return feats

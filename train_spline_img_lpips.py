@@ -1,5 +1,4 @@
 import torch
-from ttools.modules.losses import LPIPS
 import cv2
 import matplotlib.pyplot as plt
 from spline_render import QuadraticSplineParams, QuadraticSplineRenderer
@@ -7,6 +6,7 @@ import os
 import time
 from pathlib import Path
 import numpy as np
+from semantic_loss import CachedLPIPS
 
 
 def main():
@@ -44,7 +44,8 @@ def main():
     svg_dir = os.path.join(out_dir, "svg")
     os.makedirs(svg_dir, exist_ok=False)
 
-    perceptual_loss = LPIPS().to(device)
+    perceptual_loss = CachedLPIPS().to(device)
+    perceptual_loss.set_target(target[None, ...])
 
     best_loss = 1e9
     prev_loss = 1e9
@@ -55,7 +56,7 @@ def main():
         line_params.zero_grad()
         img_render = lines(*line_params())
 
-        err_perceptual = perceptual_loss(img_render, target[None, ...])
+        err_perceptual = perceptual_loss(img_render)
 
         err = err_perceptual
         err.backward()
