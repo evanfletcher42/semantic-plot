@@ -141,6 +141,8 @@ class QuadraticSplineParams(nn.Module):
         self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
         self.lc = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * 0.5)  # Line color (intensity)
 
+        self.min_intensity = 0.025
+
     def reinit_spline_split(self, replace_idx):
         """
         Re-initializes a spline by splitting the longest spline in half.
@@ -148,28 +150,42 @@ class QuadraticSplineParams(nn.Module):
         :param replace_idx: Index of the spline to replace.
         """
         with torch.no_grad():
-            # find longest, where length is very roughly approximated by distance from endpoints to control point.
-            longest_idx = 0
-            longest_len = 0.0
+            # We want to split lines that are either 1) long, or 2) really bent.
+            max_idx = 0
+            max_badness = 0
+            max_len = 0
+            max_fold = 0
+
             for i in range(self.n_lines):
-                # Candidate for splitting
+                # We are getting rid of spline replace_idx no matter what - don't try to split it
                 if i == replace_idx:
                     continue
 
-                if self.lc[0, i, 0].item() < 0.025:
+                # do not split lines that are below the invisible threshold / likely to be removed anyway
+                if self.lc[0, i, 0].item() < self.min_intensity:
                     continue
 
+                # Compute length
                 l = torch.linalg.norm(self.a[0, i, :] - self.b[0, i, :]) + torch.linalg.norm(self.b[0, i, :] - self.c[0, i, :]).item()
-                if l > longest_len:
-                    longest_idx = i
-                    longest_len = l
+
+                # compute "foldedness" (ratio of length vs distance between endpoints)
+                # Note the minus-1. Straight lines have a folded-ness of 0. Anything more bent is a bigger number.
+                f = (l / torch.linalg.norm(self.a[0, i, :] - self.c[0, i, :]) - 1.0).item()
+
+                badness = max(l, f)
+
+                if badness > max_badness:
+                    max_idx = i
+                    max_badness = badness
+                    max_len = l
+                    max_fold = f
 
         # split at midpoint
         t0 = 0.5
 
         # new control points
-        b0 = (1 - t0) * self.a[0, longest_idx, :] + t0 * self.b[0, longest_idx, :]
-        b1 = (1 - t0) * self.b[0, longest_idx, :] + t0 * self.c[0, longest_idx, :]
+        b0 = (1 - t0) * self.a[0, max_idx, :] + t0 * self.b[0, max_idx, :]
+        b1 = (1 - t0) * self.b[0, max_idx, :] + t0 * self.c[0, max_idx, :]
 
         # split point
         s0 = (1 - t0) * b0 + t0 * b1
@@ -177,14 +193,14 @@ class QuadraticSplineParams(nn.Module):
         # modify splines
         self.a[0, replace_idx, :] = s0
         self.b[0, replace_idx, :] = b1
-        self.c[0, replace_idx, :] = self.c[0, longest_idx, :]
-        self.lw[0, replace_idx, :] = self.lw[0, longest_idx, :]
-        self.lc[0, replace_idx, :] = self.lc[0, longest_idx, :]
+        self.c[0, replace_idx, :] = self.c[0, max_idx, :]
+        self.lw[0, replace_idx, :] = self.lw[0, max_idx, :]
+        self.lc[0, replace_idx, :] = self.lc[0, max_idx, :]
 
-        self.b[0, longest_idx, :] = b0
-        self.c[0, longest_idx, :] = s0
+        self.b[0, max_idx, :] = b0
+        self.c[0, max_idx, :] = s0
 
-        print(f"Split {longest_idx} (len {longest_len})")
+        print(f"Split {max_idx} (badness {max_badness} len {max_len} fold {max_fold})")
 
     def init_lines(self, loss_func=None):
         """
@@ -204,7 +220,7 @@ class QuadraticSplineParams(nn.Module):
                 for i in range(self.n_lines):
                     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf, img_pdf.shape)
 
-    def reinit_invisible(self, min_intensity=0.025, curr_img=None, loss_func=None):
+    def reinit_invisible(self, curr_img=None, loss_func=None):
         with torch.no_grad():
 
             if curr_img is None:
@@ -216,7 +232,7 @@ class QuadraticSplineParams(nn.Module):
             img_cdf = img_cdf / img_cdf[-1]
 
             for i in range(self.n_lines):
-                if self.lc[0, i, 0].item() < min_intensity:
+                if self.lc[0, i, 0].item() < self.min_intensity:
                     print("reinit", i)
 
                     # Split long splines most of the time; reroll location sometimes.
