@@ -12,7 +12,7 @@ from semantic_loss import CachedLPIPS
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    img_path = "data/kelsey_evan_portrait.jpg"
+    img_path = "data/gildun.png"
     draw_sz = (256, 256)
     n_lines = 600
 
@@ -26,10 +26,10 @@ def main():
     perceptual_loss = CachedLPIPS().to(device)
     perceptual_loss.set_target(target[None, ...])
 
-    line_params = QuadraticSplineParams(n_lines=n_lines, img_shape=draw_sz).to(device)
-    line_params.init_lines(loss_func=perceptual_loss)
-
     lines = QuadraticSplineRenderer(img_shape=draw_sz).to(device)
+
+    line_params = QuadraticSplineParams(n_lines=n_lines, img_shape=draw_sz).to(device)
+    line_params.init_lines(renderer=lines, loss_func=perceptual_loss)
 
     optim = torch.optim.Adam(
         [
@@ -54,7 +54,6 @@ def main():
 
         line_params.zero_grad()
         img_render = lines(*line_params())
-
         err_perceptual = perceptual_loss(img_render)
 
         err = err_perceptual

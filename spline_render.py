@@ -4,6 +4,7 @@ import numpy as np
 from math_helpers import cubrt, safe_acos, safe_sqrt
 # import matplotlib.pyplot as plt
 import cv2
+import tqdm
 
 
 def init_spline_random(device):
@@ -28,33 +29,71 @@ def init_spline_random(device):
            torch.from_numpy(ctrl_pt).type(torch.float32).to(device), \
            torch.from_numpy(end_pt).type(torch.float32).to(device)
 
-def init_spline_pmap(device, img_cdf, img_shape):
+
+def img_eigenvectors(img, ctr):
+    row, col = ctr
+    radius = 4
+    r_start, r_end = max(row - radius, 0), min(row + radius + 1, img.shape[0]-1)
+    c_start, c_end = max(col - radius, 0), min(col + radius + 1, img.shape[1]-1)
+    roi = img[r_start:r_end, c_start:c_end]
+
+    rows, cols = np.arange(r_start, r_end) - row, np.arange(c_start, c_end) - col
+    dr, dc = np.stack(np.meshgrid(rows, cols, indexing='ij'), axis=0)
+    mr = np.sum(roi * dr) / np.sum(roi)
+    mc = np.sum(roi * dc) / np.sum(roi)
+    Srr = np.sum(roi * dr ** 2)
+    Src = np.sum(roi * dr * dc)
+    Scc = np.sum(roi * dc ** 2)
+    cov = np.array([[Srr, Src], [Src, Scc]])
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    mean = np.array([mr, mc]) + ctr
+    principal = eigvecs[:, np.argmax(eigvals)]
+    secondary = eigvecs[:, np.argmin(eigvals)]
+
+    # plt.imshow(roi, extent=[c_start - col, c_end - col, r_end - row, r_start - row])
+    # plt.scatter(mc, mr, marker='+', color='red')
+    # plt.arrow(mc, mr, principal[1], principal[0])
+    # plt.show()
+
+    return mean, principal, secondary
+
+
+def init_spline_pmap(device, img_pdf, img_cdf, img_shape):
     """
     Initializes a single spline, contingent on the provided image-space cdf
 
     :param device: Device for the output tensor
+    :param img_pdf: 2d probability distribution
     :param img_cdf: 2d cumulative probability distribution
+    :param img_shape: Shape of target
     :return: Tuple (start_pt, ctrl_pt, end_pt), each tensors on the specified device with shape (2).
     """
+    # Roll against the image pdf
     x = np.random.rand()
     idx = np.searchsorted(img_cdf, x)
     pt = np.unravel_index(idx, img_shape)
     ctr_pt = np.array([pt[0]/img_shape[0], pt[1]/img_shape[1]])
 
-    min_line_len = 0.01
-    max_line_len = 0.05
+    # Greedily choose the biggest point
+    # pt = np.unravel_index(np.argmax(img_pdf), img_shape)
+    # ctr_pt = np.array([pt[0]/img_shape[0], pt[1]/img_shape[1]])
+    # print(ctr_pt)
 
-    line_len = np.random.uniform(min_line_len, max_line_len)
-    line_angle = np.random.uniform(0.0, 2 * np.pi)
-    line_vec = np.array([np.cos(line_angle), np.sin(line_angle)]) * line_len
+    # Crop out a ROI near this point and see how anisotropic it is.
+    mean, principal, secondary = img_eigenvectors(img_pdf, pt)
+
+    # Use these to draw a spline through the found point.
+    line_len = 0.035
+    line_vec = principal * line_len
 
     start_pt = ctr_pt - line_vec / 2
     end_pt = ctr_pt + line_vec / 2
-    ctrl_pt = (start_pt + end_pt) / 2 + np.random.normal(size=2) * line_len / 2
+    ctrl_pt = np.array([mean[0] / img_shape[0], mean[1] / img_shape[1]])
 
     return torch.from_numpy(start_pt).type(torch.float32).to(device), \
            torch.from_numpy(ctrl_pt).type(torch.float32).to(device), \
            torch.from_numpy(end_pt).type(torch.float32).to(device)
+
 
 def compute_pdf_grads(img):
     """
@@ -95,6 +134,7 @@ def compute_pdf_semantic(imgi, loss_func):
     :return: spline-goes-here probabilities, shape (h, w)
     """
     img = imgi.detach()
+    img_np = img.cpu().numpy().squeeze()
 
     with torch.enable_grad():
         img.requires_grad = True
@@ -115,12 +155,16 @@ def compute_pdf_semantic(imgi, loss_func):
     img_blur = cv2.GaussianBlur(target_np, ksize=None, sigmaX=7)
     img_blur /= np.max(img_blur)
 
-    xg = xg * img_grad_mag * (1.0 - img_blur)
+    # multiply by image: there's not much point drawing more lines where there are already lines, no matter what grads say
+    xg = xg * img_grad_mag * (1.0 - img_blur) * img_np
+    xg = np.clip(xg, a_min=0.0, a_max=None)
 
     # Normalize pdf
     xg /= np.sum(xg)
 
-    # plt.imshow(xg)
+    # fig, ax = plt.subplots(1, 2)
+    # ax[0].imshow(xg)
+    # ax[1].imshow(img_np, cmap='gray')
     # plt.show()
     # exit(0)
 
@@ -172,7 +216,7 @@ class QuadraticSplineParams(nn.Module):
                 # Note the minus-1. Straight lines have a folded-ness of 0. Anything more bent is a bigger number.
                 f = (l / torch.linalg.norm(self.a[0, i, :] - self.c[0, i, :]) - 1.0).item()
 
-                badness = max(l, f)
+                badness = l * f
 
                 if badness > max_badness:
                     max_idx = i
@@ -202,7 +246,7 @@ class QuadraticSplineParams(nn.Module):
 
         print(f"Split {max_idx} (badness {max_badness} len {max_len} fold {max_fold})")
 
-    def init_lines(self, loss_func=None):
+    def init_lines(self, loss_func=None, renderer=None):
         """
         Initializes lines based on a semantic target, or randomly if there isn't one.
         :param loss_func: Cached loss function containing the semantic target.
@@ -213,12 +257,17 @@ class QuadraticSplineParams(nn.Module):
                 for i in range(self.n_lines):
                     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
             else:
-                ones = torch.ones(loss_func.target_img.shape, dtype=torch.float32, device=self.a.device)
-                img_pdf = compute_pdf_semantic(ones, loss_func)
-                img_cdf = np.cumsum(img_pdf)
-                img_cdf = img_cdf / img_cdf[-1]
-                for i in range(self.n_lines):
-                    self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf, img_pdf.shape)
+                # lines with zero intensity do not affect the image
+                self.lc.fill_(0)
+
+                # iteratively draw on the image and add lines as gradients demand
+                for i in tqdm.tqdm(range(self.n_lines), desc="Iterative Init Lines"):
+                    drawn = renderer(*self.forward())
+                    img_pdf = compute_pdf_semantic(drawn, loss_func)
+                    img_cdf = np.cumsum(img_pdf)
+                    img_cdf = img_cdf / img_cdf[-1]
+                    self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_pdf, img_cdf, img_pdf.shape)
+                    self.lc[0, i, 0] = 0.5
 
     def reinit_invisible(self, curr_img=None, loss_func=None):
         with torch.no_grad():
@@ -240,7 +289,7 @@ class QuadraticSplineParams(nn.Module):
                         self.reinit_spline_split(i)
                     else:
                         # choose somewhere the probability map wants to
-                        self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_cdf,
+                        self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_pdf, img_cdf,
                                                                                                  img_pdf.shape)
                         self.lc[0, i, 0] = 0.5
 
