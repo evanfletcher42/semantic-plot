@@ -426,22 +426,27 @@ class QuadraticSplineRenderer(nn.Module):
 
         return d
 
-    def forward(self, a, b, c, lw, lc):
+    def forward(self, a, b, c, lw, lc, chunk_size=64):
+        B, N, _ = a.shape
 
-        # dist shape: (n, 1, rows, cols)
-        dist = self.quadratic_bezier_distance(p=self.p, a=a, b=b, c=c)
+        acc = torch.zeros((B, 1, self.img_shape[0], self.img_shape[1]), dtype = a.dtype, device = a.device)
 
-        # note: these are white (1.0) lines on a dark (0.0) background
-        intensity = torch.sigmoid((lw[..., None, None] - dist) / lw[..., None, None] * 6.0) * lc[..., None, None]
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            dist_part = self.quadratic_bezier_distance(
+                p=self.p,
+                a=a[:, start:end],
+                b=b[:, start:end],
+                c=c[:, start:end]
+            )
 
-        # Additive blending + clamp over all lines --> shape (rows, cols, 1)
-        # TODO: Actual blend should be: blended = intensity + (1 - intensity) * prev_img
-        #       That can be done in a loop.  I probably need to be reminded why doing it this way is a bad idea.
-        intensity = torch.sum(intensity, dim=1)
+            lw_part = lw[:, start:end]  # shape (1, chunk_size, 1)
+            lc_part = lc[:, start:end]  # shape (1, chunk_size, 1)
 
-        # Invert (we want dark lines on white background)
-        intensity = 1 - intensity
-        return intensity
+            intensity_part = torch.sigmoid((lw_part[..., None, None] - dist_part) / lw_part[..., None, None] * 6.0) * lc_part[..., None, None]
+            acc += torch.sum(intensity_part, dim=1)
+
+        return 1 - acc
 
 
 if __name__ == "__main__":
@@ -451,7 +456,7 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    line_params = QuadraticSplineParams(n_lines=768, img_shape=(256, 256)).to(device)
+    line_params = QuadraticSplineParams(n_lines=800, img_shape=(256, 256)).to(device)
     line_params.init_lines()
 
     lines = QuadraticSplineRenderer(img_shape=(256, 256)).to(device)
