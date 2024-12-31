@@ -339,14 +339,18 @@ class QuadraticSplineRenderer(nn.Module):
         self.register_buffer("p", torch.stack([yy, xx], dim=-1), persistent=False)
 
     def solve_cubic(self, ax, ay, az):
-        p = ay - ax * ax / 3.0
+        # cache some reused values
+        ax_2 = ax * ax
+        p = ay - (ax_2 / 3.0)
         p3 = p * p * p
-        q = ax * (2 * ax * ax - 9 * ay) / 27.0 + az
+        q = ax * (2.0 * ax_2 - 9.0 * ay) / 27.0 + az
+
         d = q * q + 4.0 * p3 / 27.0
 
         # case d > 0: one root
-        x0 = cubrt((1.0 * safe_sqrt(d) - q) * 0.5)
-        x1 = cubrt((-1.0 * safe_sqrt(d) - q) * 0.5)
+        sqrt_d = safe_sqrt(d)
+        x0 = cubrt((1.0 * sqrt_d - q) * 0.5)
+        x1 = cubrt((-1.0 * sqrt_d - q) * 0.5)
 
         root0 = x0 + x1 - ax / 3.0
 
