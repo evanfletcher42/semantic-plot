@@ -38,7 +38,8 @@ def main():
             {"params": line_params.c, "lr": 0.005},
             # {"params": line_params.lw, "lr": 0.001},
             {"params": line_params.lc, "lr": 0.004}
-        ]
+        ],
+        amsgrad=True
     )
 
     tstr = time.strftime("%Y-%m-%d_%H-%M-%S")
