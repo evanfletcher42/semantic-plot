@@ -72,12 +72,14 @@ def main():
 
         loss = err.item()
 
-        img_np = np.clip(img_render.detach().cpu().numpy() * 255, 0, 255)
-
         if loss < best_loss:
             best_loss = loss
-            cv2.imwrite(os.path.join(out_dir, "%06d_%0.04f.png" % (i, best_loss)), img_np[0, 0, ...])
-            line_params.save_svg(os.path.join(svg_dir, "%06d_%0.04f.svg" % (i, best_loss)))
+
+        if ( i < 200 and best_loss == loss and i % 10 == 0) or (best_loss == loss and i > 200) or ( i % 50 == 0 ):
+            img_np = np.clip(img_render.detach().cpu().numpy() * 255, 0, 255)
+            cv2.imwrite(os.path.join(out_dir, "%06d_%0.04f_%0.04f.png" % (i, loss, best_loss)), img_np[0, 0, ...])
+            line_params.save_svg(os.path.join(svg_dir, "%06d_%0.04f_%0.04f.svg" % (i, loss, best_loss)))
+
         else:
             # reinit invisible if we are taking negative steps
             if loss > prev_loss:
