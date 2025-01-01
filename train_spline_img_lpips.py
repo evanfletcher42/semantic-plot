@@ -12,9 +12,9 @@ from semantic_loss import CachedLPIPS
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    img_path = "data/gildun.png"
-    draw_sz = (256, 256)
-    n_lines = 600
+    img_path = "data/chicken.jpg"
+    draw_sz = (384, 384)
+    n_lines = 1600
 
     target_img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
     target_img = cv2.resize(target_img, draw_sz, interpolation=cv2.INTER_AREA)

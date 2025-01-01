@@ -182,69 +182,78 @@ class QuadraticSplineParams(nn.Module):
         self.a = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline start point
         self.b = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline control point
         self.c = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline end point
-        self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * (0.7071 / img_shape[0]))  # Line weight
+        self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * (1.0 / img_shape[0]))  # Line weight
         self.lc = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * 0.5)  # Line color (intensity)
-
+        self.img_shape = img_shape
         self.min_intensity = 0.025
 
     def reinit_spline_split(self, replace_idx):
         """
-        Re-initializes a spline by splitting the longest spline in half.
+        Re-initializes a spline by splitting the longest or most bent spline.
 
         :param replace_idx: Index of the spline to replace.
         """
         with torch.no_grad():
-            # We want to split lines that are either 1) long, or 2) really bent.
-            max_idx = 0
-            max_badness = 0
-            max_len = 0
-            max_fold = 0
+            # Extract spline parameters
+            a = self.a[0]       # Shape: (n_lines, 2)
+            b = self.b[0]       # Shape: (n_lines, 2)
+            c = self.c[0]       # Shape: (n_lines, 2)
+            lc = self.lc[0, :, 0]  # Shape: (n_lines,)
 
-            for i in range(self.n_lines):
-                # We are getting rid of spline replace_idx no matter what - don't try to split it
-                if i == replace_idx:
-                    continue
+            # Mask off the spline we are replacing, and any others that are probably about to be replaced
+            indices = torch.arange(self.n_lines, device=lc.device)
+            mask = (indices != replace_idx) & (lc >= self.min_intensity)
 
-                # do not split lines that are below the invisible threshold / likely to be removed anyway
-                if self.lc[0, i, 0].item() < self.min_intensity:
-                    continue
+            if not mask.any():
+                print("No suitable spline to split.")
+                return
 
-                # Compute length
-                l = torch.linalg.norm(self.a[0, i, :] - self.b[0, i, :]) + torch.linalg.norm(self.b[0, i, :] - self.c[0, i, :]).item()
+            ab = a - b
+            bc = b - c
+            lengths = torch.norm(ab, dim=1) + torch.norm(bc, dim=1)  # Shape: (n_lines,)
 
-                # compute "foldedness" (ratio of length vs distance between endpoints)
-                # Note the minus-1. Straight lines have a folded-ness of 0. Anything more bent is a bigger number.
-                f = (l / torch.linalg.norm(self.a[0, i, :] - self.c[0, i, :]) - 1.0).item()
+            # compute "foldedness" (ratio of length vs distance between endpoints)
+            # Note the minus-1. Straight lines have a folded-ness of 0. Anything more bent is a bigger number.
+            ac = a - c
+            ac_norm = torch.norm(ac, dim=1) + 1e-5
+            foldedness = (lengths / ac_norm) - 1.0  # Shape: (n_lines,)
 
-                badness = l * f
+            badness = lengths * foldedness
 
-                if badness > max_badness:
-                    max_idx = i
-                    max_badness = badness
-                    max_len = l
-                    max_fold = f
+            badness_masked = badness.clone()
+            badness_masked[~mask] = -float('inf')
 
-        # split at midpoint
-        t0 = 0.5
+            max_badness, max_idx = torch.max(badness_masked, dim=0)
 
-        # new control points
-        b0 = (1 - t0) * self.a[0, max_idx, :] + t0 * self.b[0, max_idx, :]
-        b1 = (1 - t0) * self.b[0, max_idx, :] + t0 * self.c[0, max_idx, :]
+            if max_badness == -float('inf'):
+                print("No suitable spline to split.")
+                return
 
-        # split point
-        s0 = (1 - t0) * b0 + t0 * b1
+            # Split the selected spline at t0 = 0.5 (midpoint)
+            t0 = 0.5
+            a_max = a[max_idx]
+            b_max = b[max_idx]
+            c_max = c[max_idx]
 
-        # modify splines
-        self.a[0, replace_idx, :] = s0
-        self.b[0, replace_idx, :] = b1
-        self.c[0, replace_idx, :] = self.c[0, max_idx, :]
-        self.lw[0, replace_idx, :] = self.lw[0, max_idx, :]
-        self.lc[0, replace_idx, :] = self.lc[0, max_idx, :]
+            # Compute new control points
+            b0 = (1 - t0) * a_max + t0 * b_max
+            b1 = (1 - t0) * b_max + t0 * c_max
+            s0 = (1 - t0) * b0 + t0 * b1
 
-        self.b[0, max_idx, :] = b0
-        self.c[0, max_idx, :] = s0
+            # Update the replace_idx spline with the new split spline
+            self.a[0, replace_idx, :] = s0
+            self.b[0, replace_idx, :] = b1
+            self.c[0, replace_idx, :] = c_max
+            self.lw[0, replace_idx, :] = self.lw[0, max_idx, :]
+            self.lc[0, replace_idx, :] = self.lc[0, max_idx, :]
 
-        print(f"Split {max_idx} (badness {max_badness} len {max_len} fold {max_fold})")
+            # Update the original max_idx spline to reflect the split
+            self.b[0, max_idx, :] = b0
+            self.c[0, max_idx, :] = s0
+
+            # Print debug information
+            print(f"Split spline {max_idx} (badness {max_badness.item():.4f}, "
+                  f"length {lengths[max_idx].item():.4f}, fold {foldedness[max_idx].item():.4f})")
 
     def init_lines(self, loss_func=None, renderer=None):
         """
@@ -262,36 +271,45 @@ class QuadraticSplineParams(nn.Module):
 
                 # iteratively draw on the image and add lines as gradients demand
                 for i in tqdm.tqdm(range(self.n_lines), desc="Iterative Init Lines"):
-                    drawn = renderer(*self.forward())
-                    img_pdf = compute_pdf_semantic(drawn, loss_func)
-                    img_cdf = np.cumsum(img_pdf)
-                    img_cdf = img_cdf / img_cdf[-1]
+
+                    # periodically reevaluate the pdf
+                    if i % 10 == 0:
+                        drawn = renderer(*self.forward())
+                        img_pdf = compute_pdf_semantic(drawn, loss_func)
+                        img_cdf = np.cumsum(img_pdf)
+                        img_cdf = img_cdf / img_cdf[-1]
+
                     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_pdf, img_cdf, img_pdf.shape)
-                    self.lc[0, i, 0] = 0.5
+
+                    # init relatively light
+                    self.lc[0, i, 0] = 0.25
 
     def reinit_invisible(self, curr_img=None, loss_func=None):
         with torch.no_grad():
-
-            if curr_img is None:
-                curr_img = torch.ones(loss_func.target_img.shape, dtype=torch.float32, device=self.a.device)
-
-            img_pdf = compute_pdf_semantic(curr_img, loss_func)
-
-            img_cdf = np.cumsum(img_pdf)
-            img_cdf = img_cdf / img_cdf[-1]
+            ab = self.a[0] - self.b[0]
+            bc = self.b[0] - self.c[0]
+            lengths = (torch.norm(ab, dim=1) + torch.norm(bc, dim=1)).cpu().numpy()  # Shape: (n_lines,)
 
             for i in range(self.n_lines):
-                if self.lc[0, i, 0].item() < self.min_intensity:
-                    print("reinit", i)
+                if self.lc[0, i, 0].item() < self.min_intensity or lengths[i] < 1.0 / self.img_shape[0]:
 
                     # Split long splines most of the time; reroll location sometimes.
                     if np.random.rand(1) < 0.80:
                         self.reinit_spline_split(i)
                     else:
                         # choose somewhere the probability map wants to
+                        if curr_img is None:
+                            curr_img = torch.ones(loss_func.target_img.shape, dtype=torch.float32, device=self.a.device)
+
+                        img_pdf = compute_pdf_semantic(curr_img, loss_func)
+
+                        img_cdf = np.cumsum(img_pdf)
+                        img_cdf = img_cdf / img_cdf[-1]
+
                         self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_pdf, img_cdf,
                                                                                                  img_pdf.shape)
-                        self.lc[0, i, 0] = 0.5
+                        self.lc[0, i, 0] = 0.15
+                        print("reinit", i, "by replacement")
 
     def save_svg(self, svg_path, img_sz=(512, 512)):
         with torch.no_grad():
@@ -317,19 +335,25 @@ class QuadraticSplineParams(nn.Module):
 
 
 class QuadraticSplineRenderer(nn.Module):
-    """
-    A self-contained stroke renderer for quadratic splines.
-    """
+    def __init__(self, img_shape=(512, 512), tile_size=(64, 64), margin=0):
+        """
+        A self-contained stroke renderer for quadratic splines.
 
-    # TODO: Efficiency improvements.
-    #  - This uses a clean, but still fairly complex, analytical solution for quadratic spline distance.
-    #    It may be more efficient to render a spline as a set of line segments.
-    #  - This will result in a dense gradient computation for every line and pixel in the image.  Many pixels will have
-    #    zero gradient wrt. parameters.  If there were a way to take advantage of this sparsity, that would be _amazing_
+        This does two things to save on memory:
+        1) Tile rendering: We carve up the image into smaller tiles; for each tile, we only render splines with bounding
+           boxes that overlap the tile.
+        2) Spline chunking: Within each tile, we consider only a subset of splines at a time.
 
-    def __init__(self, img_shape=(256, 256)):
+        TODO: Sort splines - best if there are fewer chunks per tile
+
+        :param img_shape: Shape of rendered image, (h, w)
+        :param tile_size: Size of tiles for rendering, (tile_h, tile_w)
+        margin: extra margin to expand each spline's bounding box
+        """
         super().__init__()
         self.img_shape = img_shape
+        self.tile_size = tile_size
+        self.margin = margin
 
         # Texture coordinates
         # Register these as a buffer so .to(device) works
@@ -339,6 +363,11 @@ class QuadraticSplineRenderer(nn.Module):
         self.register_buffer("p", torch.stack([yy, xx], dim=-1), persistent=False)
 
     def solve_cubic(self, ax, ay, az):
+        """
+        Solve cubic t^3 + ax t^2 + ay t + az = 0
+        Return shape (..., 2) with the relevant two roots we keep.
+        """
+
         # cache some reused values
         ax_2 = ax * ax
         p = ay - (ax_2 / 3.0)
@@ -349,26 +378,25 @@ class QuadraticSplineRenderer(nn.Module):
 
         # case d > 0: one root
         sqrt_d = safe_sqrt(d)
-        x0 = cubrt((1.0 * sqrt_d - q) * 0.5)
-        x1 = cubrt((-1.0 * sqrt_d - q) * 0.5)
+        x0 = cubrt((sqrt_d - q) * 0.5)
+        x1 = cubrt((-sqrt_d - q) * 0.5)
 
         root0 = x0 + x1 - ax / 3.0
 
         # case d <= 0: technically 3 roots, but the center one can't be the closest so we'll ignore it.
-        p3_sdiv = torch.where(abs(p3) > 1e-9, p3, torch.ones_like(p3)*1e-9)
+        p3_sdiv = torch.where(abs(p3) > 1e-9, p3, torch.ones_like(p3) * 1e-9)
 
-        v = safe_acos(-safe_sqrt(-27.0/p3_sdiv)*q*0.5)/3.0
+        v = safe_acos(-safe_sqrt(-27.0 / p3_sdiv) * q * 0.5) / 3.0
         m = torch.cos(v)
         n = torch.sin(v) * np.sqrt(3)
 
-        root1 = (m + m) * safe_sqrt(-p/3.) - ax/3.
-        root2 = (-n-m) * safe_sqrt(-p/3.) - ax/3.
+        root1 = (m + m) * safe_sqrt(-p / 3.) - ax / 3.
+        root2 = (-n - m) * safe_sqrt(-p / 3.) - ax / 3.
 
-        roots_single = torch.concat([root0, root0], dim=-1)
-        roots_double = torch.concat([root1, root2], dim=-1)
+        roots_single = torch.cat([root0, root0], dim=-1)  # shape (...,2)
+        roots_double = torch.cat([root1, root2], dim=-1)  # shape (...,2)
 
         roots = torch.where(d > 0, roots_single, roots_double)
-
         return roots
 
     def quadratic_bezier_distance(self, p, a, b, c):
@@ -389,68 +417,159 @@ class QuadraticSplineRenderer(nn.Module):
         :return: Linear distance between p and the specified curve, shape (n, ..., 1)
         """
 
-        # TODO: It looks like the original author(s) may have considerably simplified this.  Try that sometime.
-
         # This is a simple guard against point b being at (0, 0), which would make this blow up.
         b = b + 1e-5
 
-        # reshapes for broadcasting
+        tile_h, tile_w, _ = p.shape
+        p_flat = p.reshape(-1, 2)  # (tile_h*tile_w, 2). Can't be a view, the tile p is a non-contiguous slice
 
-        p_orig_shape = p.shape
-        p = p.reshape((1, 1, -1, 2))  # To shape: (..., 2)
+        # Reshapes for broadcasting
+        p_flat = p_flat.unsqueeze(0).unsqueeze(0)  # shape (1,1,tile_h*tile_w,2)
+        A = (b - a)
+        B_ = (c - b) - A
+        C = p_flat - a.unsqueeze(2)
+        D = 2.0 * A.unsqueeze(2)
 
-        a = a[:, :, None, :]
-        b = b[:, :, None, :]
-        c = c[:, :, None, :]
+        B_dot_B = torch.sum(B_.unsqueeze(2) * B_.unsqueeze(2), dim=-1, keepdim=True)
 
-        A = b - a
-        B = c - b - A
-        C = p - a
-        D = A * 2.0
+        cubic_a = (-3.0 * torch.sum(A.unsqueeze(2) * B_.unsqueeze(2), dim=-1, keepdim=True)) / (-B_dot_B)
+        cubic_b = ((torch.sum(C * B_.unsqueeze(2), dim=-1, keepdim=True) - 2.0 * torch.sum(A.unsqueeze(2) * A.unsqueeze(2), dim=-1, keepdim=True)) / (-B_dot_B))
+        cubic_c = (torch.sum(C * A.unsqueeze(2), dim=-1, keepdim=True)) / (-B_dot_B)
 
-        B_dot_B = torch.sum(B * B, dim=-1, keepdim=True)
-
-        cubic_a = (-3.0 * torch.sum(A * B, dim=-1, keepdim=True)) / (-B_dot_B)
-        cubic_b = (torch.sum(C * B, dim=-1, keepdim=True) - 2.0 * torch.sum(A * A, dim=-1, keepdim=True)) / (-B_dot_B)
-        cubic_c = (torch.sum(C * A, dim=-1, keepdim=True)) / (-B_dot_B)
-
-        roots = self.solve_cubic(cubic_a, cubic_b, cubic_c)
+        roots = self.solve_cubic(cubic_a, cubic_b, cubic_c)  # (B, M, tile_h*tile_w, 2)
 
         # T = roots
         T = torch.clamp(roots, 0.0, 1.0)
 
-        d1 = (D + B * T[:, :, :, 0, None]) * T[:, :, :, 0, None] - C
-        d2 = (D + B * T[:, :, :, 1, None]) * T[:, :, :, 1, None] - C
+        d1 = (D + B_.unsqueeze(2) * T[..., 0:1]) * T[..., 0:1] - C
+        d2 = (D + B_.unsqueeze(2) * T[..., 1:2]) * T[..., 1:2] - C
 
         dd1 = torch.sum(d1 * d1, dim=-1)
         dd2 = torch.sum(d2 * d2, dim=-1)
+        dist = safe_sqrt(torch.minimum(dd1, dd2))
 
-        d = safe_sqrt(torch.minimum(dd1, dd2))
-        d = d.reshape((d.shape[0], d.shape[1], 1, *p_orig_shape[:-1]))
+        # Reshape to (B,M,tile_h,tile_w,1)
+        dist = dist.view(dist.shape[0], dist.shape[1], tile_h, tile_w, 1)
+        return dist
 
-        return d
+    @torch.no_grad()
+    def _compute_spline_bbox_px(self, a, b, c, margin=2):
+        """
+        Return (y0,y1, x0,x1) in pixel coords for one spline a,b,c in [0..1].
+        """
+        HW = np.array(self.img_shape)
 
-    def forward(self, a, b, c, lw, lc, chunk_size=64):
+        a = a.cpu().numpy()
+        b = b.cpu().numpy()
+        c = c.cpu().numpy()
+
+        # endpoint bbox
+        mi = np.minimum(a, c)
+        ma = np.maximum(a, c)
+
+        # if control point b is outside the (a, c) bbox
+        if b[0] < mi[0] or b[0] > ma[0] or b[1] < mi[1] or b[1] > ma[1]:
+            denom = (a - 2.0 * b + c)
+            if (np.abs(denom) > 1e-9).all():
+                t = np.clip((a - b) / (a - 2.0 * b + c), a_min=0.0, a_max=1.0)
+                s = 1.0 - t
+                q = s * s * a + 2.0 * s * t * b + t * t * c
+
+                mi = np.minimum(mi, q)
+                ma = np.maximum(ma, q)
+
+        mi = np.clip(np.floor(mi * HW) - margin, 0, HW).astype(int)
+        ma = np.clip(np.ceil(ma * HW) + margin, 0, HW).astype(int)
+
+        return mi[0], ma[0], mi[1], ma[1]
+
+    def forward(self, a, b, c, lw, lc, chunk_size_splines=256):
+        """
+        a,b,c: (B, N, 2) control points in [0,1].
+        lw, lc: (B, N) line widths, line color
+        chunk_size_splines: how many splines we process at once if there's a large # of them in a tile.
+
+        Return: (B,1,H,W)
+        """
         B, N, _ = a.shape
+        H, W = self.img_shape
+        tile_h, tile_w = self.tile_size
+        device = a.device
+        dtype = a.dtype
 
-        acc = torch.zeros((B, 1, self.img_shape[0], self.img_shape[1]), dtype = a.dtype, device = a.device)
+        # Compute AABBs for all splines
+        bboxes = []
+        with torch.no_grad():
+            for bi in range(B):
+                row_bboxes = []
+                for ni in range(N):
+                    bb = self._compute_spline_bbox_px(a[bi, ni], b[bi, ni], c[bi, ni], margin=int(self.margin + 3*lw[bi, ni]))
+                    row_bboxes.append(bb)
+                bboxes.append(row_bboxes)
 
-        for start in range(0, N, chunk_size):
-            end = min(start + chunk_size, N)
-            dist_part = self.quadratic_bezier_distance(
-                p=self.p,
-                a=a[:, start:end],
-                b=b[:, start:end],
-                c=c[:, start:end]
-            )
+        out = torch.zeros((B, 1, H, W), dtype=dtype, device=device)
 
-            lw_part = lw[:, start:end]  # shape (1, chunk_size, 1)
-            lc_part = lc[:, start:end]  # shape (1, chunk_size, 1)
+        for ty in range(0, H, tile_h):
+            for tx in range(0, W, tile_w):
+                tile_y1 = min(ty + tile_h, H)
+                tile_x1 = min(tx + tile_w, W)
+                # tile area => [ty:tile_y1, tx:tile_x1]
 
-            intensity_part = torch.sigmoid((lw_part[..., None, None] - dist_part) / lw_part[..., None, None] * 6.0) * lc_part[..., None, None]
-            acc += torch.sum(intensity_part, dim=1)
+                tile_height = tile_y1 - ty
+                tile_width = tile_x1 - tx
+                if tile_height <= 0 or tile_width <= 0:
+                    continue
 
-        return 1 - acc
+                # Figure out which splines intersect this tile.
+                # Address by batch: tile_splines[b] = [indices of splines this batch that intersect this tile]
+                tile_splines = [[] for _ in range(B)]
+                for bi in range(B):
+                    for ni in range(N):
+                        y0, y1, x0, x1 = bboxes[bi][ni]
+                        if y1 > ty and y0 < tile_y1 and x1 > tx and x0 < tile_x1:
+                            tile_splines[bi].append(ni)
+
+                # Empty tile?
+                if all(len(slist) == 0 for slist in tile_splines):
+                    continue
+
+                # Slice out tile indices
+                p_sub = self.p[ty:tile_y1, tx:tile_x1].to(device)
+
+                tile_out = torch.zeros((B, tile_height, tile_width), dtype=dtype, device=device)
+
+                for bi in range(B):
+                    # spline indices that touch this tile, this batch
+                    sids = tile_splines[bi]
+                    if len(sids) == 0:
+                        continue
+
+                    for start in range(0, len(sids), chunk_size_splines):
+                        end = min(start + chunk_size_splines, len(sids))
+                        these_sids = sids[start:end]  # list of spline idx
+
+                        a_ = a[bi, these_sids, :].unsqueeze(0)  # shape (1, M_chunk,2)
+                        b_ = b[bi, these_sids, :].unsqueeze(0)
+                        c_ = c[bi, these_sids, :].unsqueeze(0)
+                        lw_ = lw[bi, these_sids]  # shape (M_chunk,)
+                        lc_ = lc[bi, these_sids]
+
+                        # compute distance => (1, M_chunk, tile_h, tile_w, 1)
+                        dist = self.quadratic_bezier_distance(p_sub, a_, b_, c_)
+
+                        # Compute intensity
+                        dist2d = dist[0, :, :, :, 0]
+                        lw_2d = lw_.view(-1, 1, 1)
+                        lc_2d = lc_.view(-1, 1, 1)
+                        intensity = torch.sigmoid((lw_2d - dist2d) / lw_2d * 6.0) * lc_2d
+
+                        # Accumulate this tile
+                        tile_out[bi] += intensity.sum(dim=0)
+
+                # Accumulate tiles into composite image
+                out[:, 0, ty:tile_y1, tx:tile_x1] += tile_out
+
+        return 1.0 - out
 
 
 if __name__ == "__main__":
@@ -459,11 +578,12 @@ if __name__ == "__main__":
     import time
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    img_shape = (256, 256)
 
-    line_params = QuadraticSplineParams(n_lines=800, img_shape=(256, 256)).to(device)
+    line_params = QuadraticSplineParams(n_lines=600, img_shape=img_shape).to(device)
     line_params.init_lines()
 
-    lines = QuadraticSplineRenderer(img_shape=(256, 256)).to(device)
+    lines = QuadraticSplineRenderer(img_shape=img_shape).to(device)
 
     # with torch.no_grad():
     for i in range(1):
