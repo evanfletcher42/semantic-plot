@@ -273,7 +273,7 @@ class QuadraticSplineParams(nn.Module):
                 for i in tqdm.tqdm(range(self.n_lines), desc="Iterative Init Lines"):
 
                     # periodically reevaluate the pdf
-                    if i % 10 == 0:
+                    if i % 25 == 0:
                         drawn = renderer(*self.forward())
                         img_pdf = compute_pdf_semantic(drawn, loss_func)
                         img_cdf = np.cumsum(img_pdf)
