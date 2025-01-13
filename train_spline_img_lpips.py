@@ -14,7 +14,12 @@ def main():
 
     img_path = "data/chicken.jpg"
     draw_sz = (384, 384)
-    n_lines = 1600
+    n_lines = 2400
+
+    warmup_n = 125  # Don't save images every iteration up to this many iterations, to speed up early stages
+    start_reset_n = 10  # Start resetting lines after this many iterations without improvement
+    stop_reset_n = 50   # If we don't have a new best loss after this many iterations, stop resetting invisible lines
+    settle_n = 200  # Terminate after this many additional steps without a new best past stop_reset_n
 
     target_img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
     target_img = cv2.resize(target_img, draw_sz, interpolation=cv2.INTER_AREA)
@@ -50,6 +55,8 @@ def main():
     best_loss = 1e9
     prev_loss = 1e9
 
+    steps_since_best = 0
+
     for i in range(1000000):
         start_t = time.perf_counter()
 
@@ -74,21 +81,30 @@ def main():
 
         if loss < best_loss:
             best_loss = loss
+            steps_since_best = 0
+        else:
+            steps_since_best += 1
 
-        if ( i < 200 and best_loss == loss and i % 10 == 0) or (best_loss == loss and i > 200) or ( i % 50 == 0 ):
+        if ( i < warmup_n and best_loss == loss and i % 10 == 0) or (best_loss == loss and i >= warmup_n) or ( i % 50 == 0 ):
             img_np = np.clip(img_render.detach().cpu().numpy() * 255, 0, 255)
             cv2.imwrite(os.path.join(out_dir, "%06d_%0.04f_%0.04f.png" % (i, loss, best_loss)), img_np[0, 0, ...])
             line_params.save_svg(os.path.join(svg_dir, "%06d_%0.04f_%0.04f.svg" % (i, loss, best_loss)))
 
-        else:
-            # reinit invisible if we are taking negative steps
-            if loss > prev_loss:
-                line_params.reinit_invisible(curr_img=img_render, loss_func=perceptual_loss)
+        # reinit invisible if we are taking negative steps
+        if start_reset_n <= steps_since_best < stop_reset_n:
+            line_params.reinit_invisible(curr_img=img_render, loss_func=perceptual_loss)
 
         prev_loss = loss
 
         end_t = time.perf_counter()
         print("Iter %d Loss %f Time %f Mem %f GB" % (i, err.item(), end_t-start_t, torch.cuda.max_memory_allocated(device)/1024/1024/1024) + (" ***" if loss == best_loss else ""))
+
+        if steps_since_best >= stop_reset_n + settle_n:
+            # Call it
+            print("Terminating after %d steps without improvement" % steps_since_best)
+            break
+
+    print("Done")
 
 
 if __name__ == "__main__":
