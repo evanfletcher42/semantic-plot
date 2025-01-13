@@ -13,7 +13,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     img_path = "data/chicken.jpg"
-    draw_sz = (384, 384)
+    draw_sz_min = 384  # Smallest dimension of input image, when resized
+
     n_lines = 2400
 
     warmup_n = 125  # Don't save images every iteration up to this many iterations, to speed up early stages
@@ -22,7 +23,20 @@ def main():
     settle_n = 200  # Terminate after this many additional steps without a new best past stop_reset_n
 
     target_img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-    target_img = cv2.resize(target_img, draw_sz, interpolation=cv2.INTER_AREA)
+    # resize
+    img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError(f"Cannot load image at {img_path}")
+
+    h, w = img.shape
+    scale = draw_sz_min / min(h, w)
+    new_size = (int(w * scale), int(h * scale))
+    target_img = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
+    draw_sz = target_img.shape
+
+    # parameter clamp factors: Smaller image dimension is 1.0 in spline space
+    clamp_val = (draw_sz[0] / min(*draw_sz), draw_sz[1]/min(*draw_sz))
+    clamp_t = torch.tensor(clamp_val, device=device)
 
     plt.imshow(target_img, cmap='gray')
     plt.show()
@@ -71,9 +85,9 @@ def main():
 
         # sanity clamping
         with torch.no_grad():
-            line_params.a.clamp_(0.0, 1.0)
-            line_params.b.clamp_(0.0, 1.0)
-            line_params.c.clamp_(0.0, 1.0)
+            line_params.a.clamp_(torch.zeros_like(clamp_t), clamp_t)
+            line_params.b.clamp_(torch.zeros_like(clamp_t), clamp_t)
+            line_params.c.clamp_(torch.zeros_like(clamp_t), clamp_t)
             line_params.lw.clamp_(1e-5, 0.10)
             line_params.lc.clamp_(0.0, 1.0)
 
@@ -88,7 +102,7 @@ def main():
         if ( i < warmup_n and best_loss == loss and i % 10 == 0) or (best_loss == loss and i >= warmup_n) or ( i % 50 == 0 ):
             img_np = np.clip(img_render.detach().cpu().numpy() * 255, 0, 255)
             cv2.imwrite(os.path.join(out_dir, "%06d_%0.04f_%0.04f.png" % (i, loss, best_loss)), img_np[0, 0, ...])
-            line_params.save_svg(os.path.join(svg_dir, "%06d_%0.04f_%0.04f.svg" % (i, loss, best_loss)))
+            line_params.save_svg(os.path.join(svg_dir, "%06d_%0.04f_%0.04f.svg" % (i, loss, best_loss)), img_sz=draw_sz)
 
         # reinit invisible if we are taking negative steps
         if start_reset_n <= steps_since_best < stop_reset_n:

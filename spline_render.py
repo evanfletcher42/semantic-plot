@@ -7,21 +7,26 @@ import cv2
 import tqdm
 
 
-def init_spline_random(device):
+def init_spline_random(device, img_shape):
     """
     Initializes a single spline, as a small-ish, random stroke, with limited curvature, in a sensible location.
     :param device: Device for the output tensor
+    :param img_shape: Shape of target image (for aspect ratio)
     :return: Tuple (start_pt, ctrl_pt, end_pt), each tensors on the specified device with shape (2).
     """
 
     min_line_len = 0.01
     max_line_len = 0.05
 
+    lim_y = img_shape[0] / min(*img_shape)
+    lim_x = img_shape[1] / min(*img_shape)
+    lims = np.array([lim_y, lim_x])
+
     line_len = np.random.uniform(min_line_len, max_line_len)
     line_angle = np.random.uniform(0.0, 2*np.pi)
     line_vec = np.array([np.cos(line_angle), np.sin(line_angle)]) * line_len
 
-    start_pt = np.random.uniform(0.0 + line_len, 1.0 - line_len, size=2)
+    start_pt = np.random.uniform(0.0 + line_len, lims - line_len, size=2)
     end_pt = start_pt + line_vec
     ctrl_pt = (start_pt + end_pt) / 2 + np.random.normal(size=2) * line_len / 2
 
@@ -72,7 +77,10 @@ def init_spline_pmap(device, img_pdf, img_cdf, img_shape):
     x = np.random.rand()
     idx = np.searchsorted(img_cdf, x)
     pt = np.unravel_index(idx, img_shape)
-    ctr_pt = np.array([pt[0]/img_shape[0], pt[1]/img_shape[1]])
+
+    pscale = 1.0 / min(*img_shape)
+
+    ctr_pt = np.array([pt[0] * pscale, pt[1] * pscale])
 
     # Greedily choose the biggest point
     # pt = np.unravel_index(np.argmax(img_pdf), img_shape)
@@ -88,7 +96,7 @@ def init_spline_pmap(device, img_pdf, img_cdf, img_shape):
 
     start_pt = ctr_pt - line_vec / 2
     end_pt = ctr_pt + line_vec / 2
-    ctrl_pt = np.array([mean[0] / img_shape[0], mean[1] / img_shape[1]])
+    ctrl_pt = np.array([mean[0] * pscale, mean[1] * pscale])
 
     return torch.from_numpy(start_pt).type(torch.float32).to(device), \
            torch.from_numpy(ctrl_pt).type(torch.float32).to(device), \
@@ -182,7 +190,7 @@ class QuadraticSplineParams(nn.Module):
         self.a = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline start point
         self.b = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline control point
         self.c = nn.Parameter(torch.zeros(size=(1, n_lines, 2)), requires_grad=True)  # Quadratic spline end point
-        self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * (1.0 / img_shape[0]))  # Line weight
+        self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * (1.0 / min(*img_shape)))  # Line weight
         self.lc = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * 0.5)  # Line color (intensity)
         self.img_shape = img_shape
         self.min_intensity = 0.025
@@ -264,7 +272,7 @@ class QuadraticSplineParams(nn.Module):
             if loss_func is None:
                 # random init
                 for i in range(self.n_lines):
-                    self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device)
+                    self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_random(self.a.device, self.img_shape)
             else:
                 # lines with zero intensity do not affect the image
                 self.lc.fill_(0)
@@ -291,7 +299,7 @@ class QuadraticSplineParams(nn.Module):
             lengths = (torch.norm(ab, dim=1) + torch.norm(bc, dim=1)).cpu().numpy()  # Shape: (n_lines,)
 
             for i in range(self.n_lines):
-                if self.lc[0, i, 0].item() < self.min_intensity or lengths[i] < 1.0 / self.img_shape[0]:
+                if self.lc[0, i, 0].item() < self.min_intensity or lengths[i] < 1.0 / max(*self.img_shape):
 
                     # Split long splines most of the time; reroll location sometimes.
                     if np.random.rand(1) < 0.80:
@@ -357,8 +365,8 @@ class QuadraticSplineRenderer(nn.Module):
 
         # Texture coordinates
         # Register these as a buffer so .to(device) works
-        yy, xx = torch.meshgrid(torch.linspace(0.0, 1.0, self.img_shape[1]),
-                                torch.linspace(0.0, 1.0, self.img_shape[0]),
+        yy, xx = torch.meshgrid(torch.linspace(0.0, self.img_shape[0] / min(*self.img_shape), self.img_shape[0]),
+                                torch.linspace(0.0, self.img_shape[1] / min(*self.img_shape), self.img_shape[1]),
                                 indexing='ij')
         self.register_buffer("p", torch.stack([yy, xx], dim=-1), persistent=False)
 
@@ -457,7 +465,9 @@ class QuadraticSplineRenderer(nn.Module):
         """
         Return (y0,y1, x0,x1) in pixel coords for one spline a,b,c in [0..1].
         """
-        HW = np.array(self.img_shape)
+
+        # scale factor to pixel space
+        SC = np.array([min(*self.img_shape)] * 2)
 
         a = a.cpu().numpy()
         b = b.cpu().numpy()
@@ -478,8 +488,8 @@ class QuadraticSplineRenderer(nn.Module):
                 mi = np.minimum(mi, q)
                 ma = np.maximum(ma, q)
 
-        mi = np.clip(np.floor(mi * HW) - margin, 0, HW).astype(int)
-        ma = np.clip(np.ceil(ma * HW) + margin, 0, HW).astype(int)
+        mi = np.clip(np.floor(mi * SC) - margin, 0, self.img_shape).astype(int)
+        ma = np.clip(np.ceil(ma * SC) + margin, 0, self.img_shape).astype(int)
 
         return mi[0], ma[0], mi[1], ma[1]
 
@@ -513,6 +523,7 @@ class QuadraticSplineRenderer(nn.Module):
             for tx in range(0, W, tile_w):
                 tile_y1 = min(ty + tile_h, H)
                 tile_x1 = min(tx + tile_w, W)
+
                 # tile area => [ty:tile_y1, tx:tile_x1]
 
                 tile_height = tile_y1 - ty
@@ -578,7 +589,7 @@ if __name__ == "__main__":
     import time
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    img_shape = (256, 256)
+    img_shape = (123, 456)
 
     line_params = QuadraticSplineParams(n_lines=600, img_shape=img_shape).to(device)
     line_params.init_lines()
