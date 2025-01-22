@@ -16,10 +16,12 @@ class CachedLPIPS(nn.Module):
         self.target = None
         self.target_img = None
 
-    def set_target(self, target_img):
+    def set_target(self, target_img, target_gray):
+        # set grayscale version of target (for initializers)
+        self.target_img = target_gray
+
         # precompute target feature map
-        self.target_img = target_img
-        self.target = self.feature_extractor(self.target_img)
+        self.target = self.feature_extractor(target_img)
         self.target = [self._l2_normalize_features(f) for f in self.target]
 
     def _l2_normalize_features(self, x, eps=1e-10):

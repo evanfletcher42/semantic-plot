@@ -91,7 +91,8 @@ def init_spline_pmap(device, img_pdf, img_cdf, img_shape):
     mean, principal, secondary = img_eigenvectors(img_pdf, pt)
 
     # Use these to draw a spline through the found point.
-    line_len = 0.035
+    # line_len = 0.030
+    line_len = 0.015
     line_vec = principal * line_len
 
     start_pt = ctr_pt - line_vec / 2
@@ -278,10 +279,11 @@ class QuadraticSplineParams(nn.Module):
                 self.lc.fill_(0)
 
                 # iteratively draw on the image and add lines as gradients demand
+                eval_n = self.n_lines // 30
                 for i in tqdm.tqdm(range(self.n_lines), desc="Iterative Init Lines"):
 
                     # periodically reevaluate the pdf
-                    if i % 25 == 0:
+                    if i % eval_n == 0:
                         drawn = renderer(*self.forward())
                         img_pdf = compute_pdf_semantic(drawn, loss_func)
                         img_cdf = np.cumsum(img_pdf)
@@ -322,13 +324,13 @@ class QuadraticSplineParams(nn.Module):
     def save_svg(self, svg_path, img_sz=(512, 512)):
         with torch.no_grad():
             svg_data = f'<svg width="{img_sz[1]}" height="{img_sz[0]}" xmlns="http://www.w3.org/2000/svg">\n'
-
+            sc = min(*img_sz)
             for i in range(self.n_lines):
-                a = self.a[0, i, :].cpu().numpy() * img_sz[0]
-                b = self.b[0, i, :].cpu().numpy() * img_sz[0]
-                c = self.c[0, i, :].cpu().numpy() * img_sz[0]
+                a = self.a[0, i, :].cpu().numpy() * sc
+                b = self.b[0, i, :].cpu().numpy() * sc
+                c = self.c[0, i, :].cpu().numpy() * sc
                 gray = int(np.clip(255 * (1 - self.lc[0, i, 0].item()) + 0.5, 0, 255))
-                lw = img_sz[0] * self.lw[0, i, 0].item()
+                lw = sc * self.lw[0, i, 0].item()
 
                 svg_data += f'  <path d="M{a[1]},{a[0]} Q{b[1]},{b[0]} {c[1]},{c[0]}" stroke="rgb({gray}, {gray}, {gray})" stroke-width="{lw}" fill="transparent"/>\n'
 
@@ -493,7 +495,7 @@ class QuadraticSplineRenderer(nn.Module):
 
         return mi[0], ma[0], mi[1], ma[1]
 
-    def forward(self, a, b, c, lw, lc, chunk_size_splines=256):
+    def forward(self, a, b, c, lw, lc, chunk_size_splines=384):
         """
         a,b,c: (B, N, 2) control points in [0,1].
         lw, lc: (B, N) line widths, line color

@@ -12,27 +12,29 @@ from semantic_loss import CachedLPIPS
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    img_path = "data/chicken.jpg"
+    img_path = "data/pepe_silvia.jpeg"
     draw_sz_min = 384  # Smallest dimension of input image, when resized
 
-    n_lines = 2400
+    n_lines = 4800
 
     warmup_n = 125  # Don't save images every iteration up to this many iterations, to speed up early stages
     start_reset_n = 10  # Start resetting lines after this many iterations without improvement
     stop_reset_n = 50   # If we don't have a new best loss after this many iterations, stop resetting invisible lines
-    settle_n = 200  # Terminate after this many additional steps without a new best past stop_reset_n
+    settle_n = 1e9  # Terminate after this many additional steps without a new best past stop_reset_n
 
-    target_img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
     # resize
-    img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise ValueError(f"Cannot load image at {img_path}")
-
-    h, w = img.shape
+    h, w, _ = img.shape
     scale = draw_sz_min / min(h, w)
     new_size = (int(w * scale), int(h * scale))
     target_img = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
-    draw_sz = target_img.shape
+    target_img_gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY)
+
+    draw_sz = target_img.shape[:2]
 
     # parameter clamp factors: Smaller image dimension is 1.0 in spline space
     clamp_val = (draw_sz[0] / min(*draw_sz), draw_sz[1]/min(*draw_sz))
@@ -41,9 +43,13 @@ def main():
     plt.imshow(target_img, cmap='gray')
     plt.show()
 
+    # to channels first
+    target_img = np.moveaxis(target_img, -1, 0)
+
     target = torch.tensor(target_img / 255.0, dtype=torch.float32).to(device)
+    target_gray = torch.tensor(target_img_gray / 255.0, dtype=torch.float32).to(device)
     perceptual_loss = CachedLPIPS().to(device)
-    perceptual_loss.set_target(target[None, ...])
+    perceptual_loss.set_target(target, target_gray)
 
     lines = QuadraticSplineRenderer(img_shape=draw_sz).to(device)
 
@@ -52,11 +58,11 @@ def main():
 
     optim = torch.optim.Adam(
         [
-            {"params": line_params.a, "lr": 0.005},
-            {"params": line_params.b, "lr": 0.005},
-            {"params": line_params.c, "lr": 0.005},
+            {"params": line_params.a, "lr": 0.00375},
+            {"params": line_params.b, "lr": 0.00375},
+            {"params": line_params.c, "lr": 0.00375},
             # {"params": line_params.lw, "lr": 0.001},
-            {"params": line_params.lc, "lr": 0.004}
+            {"params": line_params.lc, "lr": 0.00300}
         ],
         amsgrad=True
     )
