@@ -171,12 +171,6 @@ def compute_pdf_semantic(imgi, loss_func):
     # Normalize pdf
     xg /= np.sum(xg)
 
-    # fig, ax = plt.subplots(1, 2)
-    # ax[0].imshow(xg)
-    # ax[1].imshow(img_np, cmap='gray')
-    # plt.show()
-    # exit(0)
-
     return xg
 
 
