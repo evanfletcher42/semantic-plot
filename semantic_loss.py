@@ -51,7 +51,7 @@ class CachedLPIPS(nn.Module):
     class _FeatureExtractor(nn.Module):
         def __init__(self):
             super(CachedLPIPS._FeatureExtractor, self).__init__()
-            vgg_pretrained = torchvision.models.vgg16(pretrained=True).features
+            vgg_pretrained = torchvision.models.vgg16(weights=torchvision.models.VGG16_Weights.IMAGENET1K_V1).features
 
             # Split at the maxpools, before ReLU
             self.breakpoints = [0, 3, 8, 15, 22, 29]
