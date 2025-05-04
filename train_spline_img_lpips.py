@@ -12,15 +12,27 @@ from semantic_loss import CachedLPIPS
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    img_path = "data/pepe_silvia.jpeg"
+    img_path = "data/eagle-3.png"
     draw_sz_min = 384  # Smallest dimension of input image, when resized
 
-    n_lines = 4800
+    n_lines = 3600
 
-    warmup_n = 125  # Don't save images every iteration up to this many iterations, to speed up early stages
-    start_reset_n = 10  # Start resetting lines after this many iterations without improvement
-    stop_reset_n = 50   # If we don't have a new best loss after this many iterations, stop resetting invisible lines
-    settle_n = 1e9  # Terminate after this many additional steps without a new best past stop_reset_n
+    quantize_lc_n = None  # No quantization (use for full solve from scratch)
+    # quantize_lc_n = 16 + 1  # Quantization levels for refinement, including "no line"
+
+    if quantize_lc_n is None:
+        warmup_n = 125  # Don't save images every iteration up to this many iterations, to speed up early stages
+    else:
+        warmup_n = 0
+
+    if quantize_lc_n is None:
+        start_reset_n = 10  # Start resetting lines after this many iterations without improvement
+        stop_reset_n = 50  # If we don't have a new best loss after this many iterations, stop resetting invisible lines
+    else:
+        start_reset_n = 100
+        stop_reset_n = 110
+
+    settle_n = 300  # Terminate after this many additional steps without a new best past stop_reset_n
 
     img = cv2.imread(img_path, cv2.IMREAD_COLOR)
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -51,21 +63,41 @@ def main():
     perceptual_loss = CachedLPIPS().to(device)
     perceptual_loss.set_target(target, target_gray)
 
-    lines = QuadraticSplineRenderer(img_shape=draw_sz).to(device)
+    lines = QuadraticSplineRenderer(img_shape=draw_sz, quantize=quantize_lc_n).to(device)
 
     line_params = QuadraticSplineParams(n_lines=n_lines, img_shape=draw_sz).to(device)
+
+    # Init from empty
     line_params.init_lines(renderer=lines, loss_func=perceptual_loss)
 
-    optim = torch.optim.Adam(
-        [
-            {"params": line_params.a, "lr": 0.00375},
-            {"params": line_params.b, "lr": 0.00375},
-            {"params": line_params.c, "lr": 0.00375},
-            # {"params": line_params.lw, "lr": 0.001},
-            {"params": line_params.lc, "lr": 0.00300}
-        ],
-        amsgrad=True
-    )
+    # Init from file (for refinement solve)
+    # line_params.load_from_svg("path/to/strokes.svg")
+    if quantize_lc_n is not None:
+        line_params.min_intensity = 1.0 / (quantize_lc_n - 1) / 2
+
+    if quantize_lc_n is None:
+        optim = torch.optim.Adam(
+            [
+                {"params": line_params.a, "lr": 0.00375},
+                {"params": line_params.b, "lr": 0.00375},
+                {"params": line_params.c, "lr": 0.00375},
+                # {"params": line_params.lw, "lr": 0.001},
+                {"params": line_params.lc, "lr": 0.00300}
+            ],
+            amsgrad=True
+        )
+    else:
+        # lower learning rates for refinement solves
+        optim = torch.optim.Adam(
+            [
+                {"params": line_params.a, "lr": 0.00125},
+                {"params": line_params.b, "lr": 0.00125},
+                {"params": line_params.c, "lr": 0.00125},
+                # {"params": line_params.lw, "lr": 0.001},
+                {"params": line_params.lc, "lr": 0.00100}
+            ],
+            amsgrad=True
+        )
 
     tstr = time.strftime("%Y-%m-%d_%H-%M-%S")
     out_dir = os.path.join("outputs", Path(os.path.basename(img_path)).stem + "_" + tstr)
@@ -73,7 +105,6 @@ def main():
     os.makedirs(svg_dir, exist_ok=False)
 
     best_loss = 1e9
-    prev_loss = 1e9
 
     steps_since_best = 0
 
@@ -84,7 +115,14 @@ def main():
         img_render = lines(*line_params())
         err_perceptual = perceptual_loss(img_render)
 
-        err = err_perceptual
+        if quantize_lc_n is not None:
+            # regularize lines for not-scribblyness
+            err_reg_len = line_params.regularize_len()
+            err = err_perceptual + err_reg_len
+        else:
+            err = err_perceptual
+            err_reg_len = torch.Tensor([0])
+
         err.backward()
 
         optim.step()
@@ -112,20 +150,23 @@ def main():
 
         # reinit invisible if we are taking negative steps
         if start_reset_n <= steps_since_best < stop_reset_n:
+            print("Reinit invisible...")
             line_params.reinit_invisible(curr_img=img_render, loss_func=perceptual_loss)
 
-        prev_loss = loss
-
         end_t = time.perf_counter()
-        print("Iter %d Loss %f Time %f Mem %f GB" % (i, err.item(), end_t-start_t, torch.cuda.max_memory_allocated(device)/1024/1024/1024) + (" ***" if loss == best_loss else ""))
+        print("Iter %d Loss %f Percep %f LReg %f Time %f Mem %f GB" % (i, loss, err_perceptual.item(), err_reg_len.item(), end_t-start_t, torch.cuda.max_memory_allocated(device)/1024/1024/1024) + (" ***" if loss == best_loss else ""))
 
         if steps_since_best >= stop_reset_n + settle_n:
             # Call it
-            print("Terminating after %d steps without improvement" % steps_since_best)
-            break
+            # print("Terminating after %d steps without improvement" % steps_since_best)
+            # break
+
+            # HACK: Force line reinitialization if we've been stuck here for a bit
+            steps_since_best = 0
 
     print("Done")
 
 
 if __name__ == "__main__":
     main()
+    print("Exit")

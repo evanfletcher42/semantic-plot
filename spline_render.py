@@ -5,6 +5,7 @@ from math_helpers import cubrt, safe_acos, safe_sqrt
 # import matplotlib.pyplot as plt
 import cv2
 import tqdm
+import xml.etree.ElementTree as ET
 
 
 def init_spline_random(device, img_shape):
@@ -152,7 +153,7 @@ def compute_pdf_semantic(imgi, loss_func):
         xg = img.grad.cpu().numpy().squeeze()
 
     # blur this a bit. This is going to have checkerboard-y artifacts that we don't want to draw.
-    xg = cv2.GaussianBlur(xg, ksize=None, sigmaX=1.414)
+    xg = cv2.GaussianBlur(xg, ksize=None, sigmaX=2.82)
     xg = np.clip(xg, a_min=0.0, a_max=None) # we care only about areas where the image wants to be darker
 
     # init lines where there are actual edges in the image
@@ -188,7 +189,7 @@ class QuadraticSplineParams(nn.Module):
         self.lw = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * (1.0 / min(*img_shape)))  # Line weight
         self.lc = nn.Parameter(torch.ones(size=(1, n_lines, 1), requires_grad=True) * 0.5)  # Line color (intensity)
         self.img_shape = img_shape
-        self.min_intensity = 0.025
+        self.min_intensity = 0.005
 
     def reinit_spline_split(self, replace_idx):
         """
@@ -286,7 +287,7 @@ class QuadraticSplineParams(nn.Module):
                     self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_pdf, img_cdf, img_pdf.shape)
 
                     # init relatively light
-                    self.lc[0, i, 0] = 0.25
+                    self.lc[0, i, 0] = 0.10
 
     def reinit_invisible(self, curr_img=None, loss_func=None):
         with torch.no_grad():
@@ -312,17 +313,21 @@ class QuadraticSplineParams(nn.Module):
 
                         self.a[0, i, :], self.b[0, i, :], self.c[0, i, :] = init_spline_pmap(self.a.device, img_pdf, img_cdf,
                                                                                                  img_pdf.shape)
-                        self.lc[0, i, 0] = 0.15
+                        self.lc[0, i, 0] = 0.10
                         print("reinit", i, "by replacement")
 
     def save_svg(self, svg_path, img_sz=(512, 512)):
         with torch.no_grad():
             svg_data = f'<svg width="{img_sz[1]}" height="{img_sz[0]}" xmlns="http://www.w3.org/2000/svg">\n'
             sc = min(*img_sz)
+            an = self.a.cpu().numpy()
+            bn = self.b.cpu().numpy()
+            cn = self.c.cpu().numpy()
+
             for i in range(self.n_lines):
-                a = self.a[0, i, :].cpu().numpy() * sc
-                b = self.b[0, i, :].cpu().numpy() * sc
-                c = self.c[0, i, :].cpu().numpy() * sc
+                a = an[0, i, :] * sc
+                b = bn[0, i, :] * sc
+                c = cn[0, i, :] * sc
                 gray = int(np.clip(255 * (1 - self.lc[0, i, 0].item()) + 0.5, 0, 255))
                 lw = sc * self.lw[0, i, 0].item()
 
@@ -333,13 +338,68 @@ class QuadraticSplineParams(nn.Module):
             with open(svg_path, 'w') as svg_file:
                 svg_file.write(svg_data)
 
+    def load_from_svg(self, svg_path):
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+        width = float(root.attrib['width'])
+        height = float(root.attrib['height'])
+        sc = min(width, height)
+
+        paths = root.findall('{http://www.w3.org/2000/svg}path')
+        n_lines = len(paths)
+
+        a_arr = np.zeros((1, n_lines, 2), np.float32)
+        b_arr = np.zeros((1, n_lines, 2), np.float32)
+        c_arr = np.zeros((1, n_lines, 2), np.float32)
+        lc_arr = np.zeros((1, n_lines, 1), np.float32)
+        lw_arr = np.zeros((1, n_lines, 1), np.float32)
+
+        for i, path in enumerate(paths):
+            # Expected format: "M{x1},{y1} Q{x2},{y2} {x3},{y3}"
+            parts = path.attrib['d'].split()
+            # Parse starting point (stored as M{a[1]},{a[0]})
+            m_coords = list(map(float, parts[0][1:].split(',')))
+            # Parse control point (stored as Q{b[1]},{b[0]})
+            q_coords = list(map(float, parts[1][1:].split(',')))
+            # Parse end point (stored as {c[1]},{c[0]})
+            c_coords = list(map(float, parts[2].split(',')))
+
+            # Reverse the coordinate swap and scaling (original = [y, x] / sc)
+            a_arr[0, i, :] = [m_coords[1] / sc, m_coords[0] / sc]
+            b_arr[0, i, :] = [q_coords[1] / sc, q_coords[0] / sc]
+            c_arr[0, i, :] = [c_coords[1] / sc, c_coords[0] / sc]
+
+            # Parse stroke: "rgb(gray, gray, gray)"
+            inside = path.attrib['stroke'][4:-1]
+            gray = int(inside.split(',')[0])
+            lc_arr[0, i, 0] = 1 - gray / 255.0
+
+            # Const init line width
+            lw_arr[0, i, 0] = (1.0 / min(*self.img_shape)) / 2
+
+        self.a = nn.Parameter(torch.tensor(a_arr, device=self.a.device))
+        self.b = nn.Parameter(torch.tensor(b_arr, device=self.a.device))
+        self.c = nn.Parameter(torch.tensor(c_arr, device=self.a.device))
+        self.lc = nn.Parameter(torch.tensor(lc_arr, device=self.a.device))
+        self.lw = nn.Parameter(torch.tensor(lw_arr, device=self.a.device))
+        self.n_lines = n_lines
+
+    def regularize_len(self):
+        """Punish long splines."""
+
+        # Approximate length
+        ab = self.a[0] - self.b[0]
+        bc = self.b[0] - self.c[0]
+        lengths = (torch.norm(ab, dim=1) + torch.norm(bc, dim=1))
+        return torch.sum(torch.square(lengths)) * (1.0 / 64.0)
+
     def forward(self):
         # Return parameters directly
         return self.a, self.b, self.c, self.lw, self.lc
 
 
 class QuadraticSplineRenderer(nn.Module):
-    def __init__(self, img_shape=(512, 512), tile_size=(64, 64), margin=0):
+    def __init__(self, img_shape=(512, 512), tile_size=(64, 64), margin=0, quantize=None):
         """
         A self-contained stroke renderer for quadratic splines.
 
@@ -358,6 +418,7 @@ class QuadraticSplineRenderer(nn.Module):
         self.img_shape = img_shape
         self.tile_size = tile_size
         self.margin = margin
+        self.quantize = quantize
 
         # Texture coordinates
         # Register these as a buffer so .to(device) works
@@ -489,7 +550,7 @@ class QuadraticSplineRenderer(nn.Module):
 
         return mi[0], ma[0], mi[1], ma[1]
 
-    def forward(self, a, b, c, lw, lc, chunk_size_splines=384):
+    def forward(self, a, b, c, lw, lc, chunk_size_splines=384):  # 384
         """
         a,b,c: (B, N, 2) control points in [0,1].
         lw, lc: (B, N) line widths, line color
@@ -502,6 +563,12 @@ class QuadraticSplineRenderer(nn.Module):
         tile_h, tile_w = self.tile_size
         device = a.device
         dtype = a.dtype
+
+        # Optional quantization of line color via the detach trick
+        if self.quantize:
+            scale = self.quantize - 1
+            lcq = torch.round(lc * scale ) / scale
+            lc = lc + (lcq - lc ).detach()
 
         # Compute AABBs for all splines
         bboxes = []
