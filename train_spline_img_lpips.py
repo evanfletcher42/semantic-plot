@@ -7,18 +7,81 @@ import time
 from pathlib import Path
 import numpy as np
 from semantic_loss import CachedLPIPS
+import argparse
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Computes a set of splines that semantically match an input image",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument(
+        "-i", "--target-path",
+        type=Path,
+        required=True,
+        help="Target image path (required)."
+    )
+
+    parser.add_argument(
+        "-o", "--output-path",
+        type=Path,
+        default=Path("outputs"),
+        help="Outputs directory. Each run will create a folder in this directory. Will be created if missing."
+    )
+
+    parser.add_argument(
+        "-n", "--num-splines",
+        type=int,
+        default=3600,
+        help="Number of splines to draw."
+    )
+
+    parser.add_argument(
+        "-s", "--size-min",
+        type=int,
+        default=384,
+        help="Minimum dimension of the rendered image. Target images will be resized to this."
+    )
+
+    parser.add_argument(
+        "-q", "--quantize",
+        type=int,
+        default=None,
+        help="Optional quantization of line weight to a specified number of overlaid strokes. No quantization if unspecified."
+    )
+
+    parser.add_argument(
+        "--init-svg",
+        type=Path,
+        default=None,
+        help="Optional spline init from a SVG file from a previous run, instead of from scratch."
+    )
+
+    args = parser.parse_args()
+
+    if not args.target_path.exists() or not args.target_path.is_file():
+        parser.error(f"--target-img {args.target_path} does not exist or is not a file")
+
+    if not isinstance(args.num_splines, int) or args.num_splines <= 0:
+        parser.error(f"Invalid --num-splines: {args.num_splines}")
+
+    if not isinstance(args.size_min, int) or args.size_min <= 1:
+        parser.error(f"Invalid --size-min: {args.num_splines}")
+
+    return args
 
 
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args = parse_args()
 
-    img_path = "data/eagle-3.png"
-    draw_sz_min = 384  # Smallest dimension of input image, when resized
-
-    n_lines = 3600
-
-    quantize_lc_n = None  # No quantization (use for full solve from scratch)
-    # quantize_lc_n = 16 + 1  # Quantization levels for refinement, including "no line"
+    img_path = args.target_path
+    n_lines = args.num_splines
+    draw_sz_min = args.size_min
+    quantize_lc_n = args.quantize
 
     if quantize_lc_n is None:
         warmup_n = 125  # Don't save images every iteration up to this many iterations, to speed up early stages
