@@ -1,6 +1,5 @@
 import torch
 import cv2
-import matplotlib.pyplot as plt
 from spline_render import QuadraticSplineParams, QuadraticSplineRenderer
 import os
 import time
@@ -114,9 +113,6 @@ def main():
     # parameter clamp factors: Smaller image dimension is 1.0 in spline space
     clamp_val = (draw_sz[0] / min(*draw_sz), draw_sz[1]/min(*draw_sz))
     clamp_t = torch.tensor(clamp_val, device=device)
-
-    plt.imshow(target_img, cmap='gray')
-    plt.show()
 
     # to channels first
     target_img = np.moveaxis(target_img, -1, 0)
