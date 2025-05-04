@@ -57,7 +57,7 @@ def parse_args():
         "--init-svg",
         type=Path,
         default=None,
-        help="Optional spline init from a SVG file from a previous run, instead of from scratch."
+        help="Optional spline init from a SVG file from a previous run, instead of from scratch. Note: Overrides some settings, like number of lines or image size."
     )
 
     args = parser.parse_args()
@@ -70,6 +70,9 @@ def parse_args():
 
     if not isinstance(args.size_min, int) or args.size_min <= 1:
         parser.error(f"Invalid --size-min: {args.num_splines}")
+
+    if args.init_svg is not None and (not args.init_svg.exists() or not args.init_svg.is_file()):
+        parser.error(f"--init-svg {args.init_svg} does not exist or is not a file")
 
     return args
 
@@ -126,11 +129,12 @@ def main():
 
     line_params = QuadraticSplineParams(n_lines=n_lines, img_shape=draw_sz).to(device)
 
-    # Init from empty
-    line_params.init_lines(renderer=lines, loss_func=perceptual_loss)
+    if args.init_svg:
+        # Init from file
+        line_params.load_from_svg(str(args.init_svg))
+    else:
+        line_params.init_lines(renderer=lines, loss_func=perceptual_loss)
 
-    # Init from file (for refinement solve)
-    # line_params.load_from_svg("path/to/strokes.svg")
     if quantize_lc_n is not None:
         line_params.min_intensity = 1.0 / (quantize_lc_n - 1) / 2
 
