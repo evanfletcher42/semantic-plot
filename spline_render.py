@@ -639,7 +639,6 @@ class QuadraticSplineRenderer(nn.Module):
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    import torchinfo
     import time
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
