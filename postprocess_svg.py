@@ -95,7 +95,7 @@ def process_svg(input_path, output_path, gray_levels, jitter_std, min_threshold,
         lw = float(lw_)
 
         dval = (255 - intensity) / 255
-        n_mult_f = (dval - min_threshold) / (1 - min_threshold) * gray_levels
+        n_mult_f = (dval - min_threshold) / (1 - min_threshold) * (gray_levels - 1)
         n_mult = round(n_mult_f)
         resid = max(0.0, n_mult_f - n_mult)
 
