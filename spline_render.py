@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 from math_helpers import cubrt, safe_acos, safe_sqrt
-# import matplotlib.pyplot as plt
 import cv2
 import tqdm
 import xml.etree.ElementTree as ET
@@ -55,11 +54,6 @@ def img_eigenvectors(img, ctr):
     mean = np.array([mr, mc]) + ctr
     principal = eigvecs[:, np.argmax(eigvals)]
     secondary = eigvecs[:, np.argmin(eigvals)]
-
-    # plt.imshow(roi, extent=[c_start - col, c_end - col, r_end - row, r_start - row])
-    # plt.scatter(mc, mr, marker='+', color='red')
-    # plt.arrow(mc, mr, principal[1], principal[0])
-    # plt.show()
 
     return mean, principal, secondary
 
@@ -123,9 +117,6 @@ def compute_pdf_grads(img):
 
     # Normalize pdf
     img_grad_mag /= np.sum(img_grad_mag)
-
-    # plt.imshow(img_grad_mag)
-    # plt.show()
 
     return img_grad_mag
 
