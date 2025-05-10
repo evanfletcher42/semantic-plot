@@ -56,9 +56,6 @@ class CachedLPIPS(nn.Module):
             # Split at the maxpools, before ReLU
             self.breakpoints = [0, 3, 8, 15, 22, 29]
 
-            # Split after ReLU
-            # self.breakpoints = [0, 4, 9, 16, 23, 30]
-
             for i, b in enumerate(self.breakpoints[:-1]):
                 ops = nn.Sequential()
                 for idx in range(b, self.breakpoints[i+1]):
