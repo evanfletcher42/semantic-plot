@@ -45,7 +45,7 @@ def len_bezier(a, b, c):
     return np.sum(np.linalg.norm(dp, axis=-1))
 
 
-def wobble_curve_svg(a, b, c, jitter_std):
+def wobble_curve_svg(a, b, c, jitter_std, sw):
     """Add hand wobble to a quadratic bezier for SVG paths."""
     curve_len = len_bezier(a, b, c)
     std = jitter_std * curve_len / 256
@@ -63,7 +63,7 @@ def wobble_curve_svg(a, b, c, jitter_std):
     d = f'M{s0j[0][0]},{s0j[0][1]} Q{s0j[1][0]},{s0j[1][1]} {s0j[2][0]},{s0j[2][1]} '
     for p in chain:
         d += f'T {p[0]},{p[1]} '
-    return f'  <path d="{d}" stroke="black" stroke-width="0.25" fill="none"/>'
+    return f'  <path d="{d}" stroke="black" stroke-width="{sw}" fill="none"/>'
 
 
 def process_svg(input_path, output_path, gray_levels, jitter_std, min_threshold, skip_halflevel, sort_right, wobble):
@@ -127,11 +127,11 @@ def process_svg(input_path, output_path, gray_levels, jitter_std, min_threshold,
                 ai, ci = ci, ai
 
             if wobble:
-                line = wobble_curve_svg(ai, bi, ci, jitter_std)
+                line = wobble_curve_svg(ai, bi, ci, jitter_std, lw / (gray_levels - 1))
             else:
                 line = (
                     f'  <path d="M{ai[0]},{ai[1]} Q{bi[0]},{bi[1]} {ci[0]},{ci[1]}" '
-                    f'stroke="black" stroke-width="{lw}" fill="none"/>'
+                    f'stroke="black" stroke-width="{lw / (gray_levels - 1)}" fill="none"/>'
                 )
             output_lines.append(line)
             total += 1
