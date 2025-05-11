@@ -365,8 +365,8 @@ class QuadraticSplineParams(nn.Module):
             gray = int(inside.split(',')[0])
             lc_arr[0, i, 0] = 1 - gray / 255.0
 
-            # Const init line width
-            lw_arr[0, i, 0] = (1.0 / min(*self.img_shape)) / 2
+            # Line width
+            lw_arr[0, i, 0] = float(path.attrib["stroke-width"]) / sc
 
         self.a = nn.Parameter(torch.tensor(a_arr, device=self.a.device))
         self.b = nn.Parameter(torch.tensor(b_arr, device=self.a.device))
