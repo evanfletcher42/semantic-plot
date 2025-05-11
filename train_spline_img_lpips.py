@@ -141,9 +141,11 @@ def main():
         # Init from file
         line_params.load_from_svg(str(args.init_svg))
     else:
+        # Init based on target image
         line_params.init_lines(renderer=lines, loss_func=perceptual_loss)
 
     if quantize_lc_n is not None:
+        # Move invisible-spline threshold to 1/2 quantized intensity
         line_params.min_intensity = 1.0 / (quantize_lc_n - 1) / 2
 
     if quantize_lc_n is None:
@@ -158,7 +160,7 @@ def main():
             amsgrad=True
         )
     else:
-        # lower learning rates for refinement solves
+        # lower learning rates for quantized solves
         optim = torch.optim.Adam(
             [
                 {"params": line_params.a, "lr": 0.00125},
@@ -228,11 +230,6 @@ def main():
         print("Iter %d Loss %f Percep %f RegSL %f Time %f Mem %f GB" % (i, loss, err_perceptual.item(), err_reg_len.item(), end_t-start_t, torch.cuda.max_memory_allocated(device)/1024/1024/1024) + (" ***" if loss == best_loss else ""))
 
         if steps_since_best >= stop_reset_n + settle_n:
-            # Call it
-            # print("Terminating after %d steps without improvement" % steps_since_best)
-            # break
-
-            # HACK: Force line reinitialization if we've been stuck here for a bit
             steps_since_best = 0
 
     print("Done")

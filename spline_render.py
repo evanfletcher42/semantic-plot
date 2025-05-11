@@ -77,16 +77,10 @@ def init_spline_pmap(device, img_pdf, img_cdf, img_shape):
 
     ctr_pt = np.array([pt[0] * pscale, pt[1] * pscale])
 
-    # Greedily choose the biggest point
-    # pt = np.unravel_index(np.argmax(img_pdf), img_shape)
-    # ctr_pt = np.array([pt[0]/img_shape[0], pt[1]/img_shape[1]])
-    # print(ctr_pt)
-
     # Crop out a ROI near this point and see how anisotropic it is.
     mean, principal, secondary = img_eigenvectors(img_pdf, pt)
 
     # Use these to draw a spline through the found point.
-    # line_len = 0.030
     line_len = 0.015
     line_vec = principal * line_len
 
@@ -399,8 +393,6 @@ class QuadraticSplineRenderer(nn.Module):
            boxes that overlap the tile.
         2) Spline chunking: Within each tile, we consider only a subset of splines at a time.
 
-        TODO: Sort splines - best if there are fewer chunks per tile
-
         :param img_shape: Shape of rendered image, (h, w)
         :param tile_size: Size of tiles for rendering, (tile_h, tile_w)
         margin: extra margin to expand each spline's bounding box
@@ -635,33 +627,3 @@ class QuadraticSplineRenderer(nn.Module):
                 out[:, 0, ty:tile_y1, tx:tile_x1] += tile_out
 
         return 1.0 - out
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    import time
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    img_shape = (123, 456)
-
-    line_params = QuadraticSplineParams(n_lines=600, img_shape=img_shape).to(device)
-    line_params.init_lines()
-
-    lines = QuadraticSplineRenderer(img_shape=img_shape).to(device)
-
-    # with torch.no_grad():
-    for i in range(1):
-        t1 = time.perf_counter_ns()
-        img = lines(*line_params())
-        t2 = time.perf_counter_ns()
-        img_mean = torch.mean(img)
-        img_mean.backward()
-        t3 = time.perf_counter_ns()
-        print("Render time:", (t2 - t1) * 1e-6, "ms")
-        print("Backprop time:", (t3 - t2) * 1e-6, "ms")
-        print("max mem:", torch.cuda.max_memory_allocated(device) / 1024 / 1024)
-        print("img shape:", img.shape)
-
-    img_n = img.detach().cpu().numpy()[0, 0, ...]
-    plt.imshow(img_n, cmap='gray')
-    plt.show()
