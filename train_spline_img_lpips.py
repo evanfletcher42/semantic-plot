@@ -54,6 +54,13 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--reg-sl",
+        type=float,
+        default=0.0,
+        help="Weighting factor for spline-length regularization. If zero, not computed."
+    )
+
+    parser.add_argument(
         "--init-svg",
         type=Path,
         default=None,
@@ -84,6 +91,7 @@ def main():
     n_lines = args.num_splines
     draw_sz_min = args.size_min
     quantize_lc_n = args.quantize
+    sl_weight = args.reg_sl
 
     if quantize_lc_n is None:
         warmup_n = 125  # Don't save images every iteration up to this many iterations, to speed up early stages
@@ -178,10 +186,10 @@ def main():
         img_render = lines(*line_params())
         err_perceptual = perceptual_loss(img_render)
 
-        if quantize_lc_n is not None:
-            # regularize lines for not-scribblyness
+        if sl_weight > 0:
+            # Punish long splines
             err_reg_len = line_params.regularize_len()
-            err = err_perceptual + err_reg_len
+            err = err_perceptual + sl_weight * err_reg_len
         else:
             err = err_perceptual
             err_reg_len = torch.Tensor([0])
@@ -217,7 +225,7 @@ def main():
             line_params.reinit_invisible(curr_img=img_render, loss_func=perceptual_loss)
 
         end_t = time.perf_counter()
-        print("Iter %d Loss %f Percep %f LReg %f Time %f Mem %f GB" % (i, loss, err_perceptual.item(), err_reg_len.item(), end_t-start_t, torch.cuda.max_memory_allocated(device)/1024/1024/1024) + (" ***" if loss == best_loss else ""))
+        print("Iter %d Loss %f Percep %f RegSL %f Time %f Mem %f GB" % (i, loss, err_perceptual.item(), err_reg_len.item(), end_t-start_t, torch.cuda.max_memory_allocated(device)/1024/1024/1024) + (" ***" if loss == best_loss else ""))
 
         if steps_since_best >= stop_reset_n + settle_n:
             # Call it
