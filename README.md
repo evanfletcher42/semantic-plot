@@ -1,6 +1,9 @@
 # semantic-plot
 Generate human-like line art for plotters from images, via differentiable rendering and perceptual losses
-
+| | |
+|:-------------------------:|:-------------------------:|
+| <img src="examples/wroclaw_sbs_big.jpg"> |  <img src="examples/catrin_sbs_big.jpg">  |
+| <img src="examples/Hirundo_rustica_Ormoz_sbs_big.jpg"> |  <img src="examples/pride_of_baltimore_II_sbs_big.jpg"> |
 ## Getting Started
 
 ### Dependencies / Setup
